@@ -6,8 +6,10 @@ import * as nls from 'vscode-nls';
 
 const localize = nls.loadMessageBundle();
 
+export type JSONLanguageStatus = { schemas: string[] };
+
 import {
-	workspace, window, languages, commands, ExtensionContext, extensions, Uri, LanguageConfiguration,
+	workspace, window, languages, commands, ExtensionContext, extensions, Uri,
 	Diagnostic, StatusBarAlignment, TextEditor, TextDocument, FormattingOptions, CancellationToken,
 	ProviderResult, TextEdit, Range, Position, Disposable, CompletionItem, CompletionList, CompletionContext, Hover, MarkdownString,
 } from 'vscode';
@@ -18,19 +20,24 @@ import {
 } from 'vscode-languageclient';
 
 import { hash } from './utils/hash';
-import { RequestService, joinPath } from './requests';
+import { createLanguageStatusItem } from './languageStatus';
 
 namespace VSCodeContentRequest {
-	export const type: RequestType<string, string, any, any> = new RequestType('vscode/content');
+	export const type: RequestType<string, string, any> = new RequestType('vscode/content');
 }
 
 namespace SchemaContentChangeNotification {
-	export const type: NotificationType<string, any> = new NotificationType('json/schemaContent');
+	export const type: NotificationType<string> = new NotificationType('json/schemaContent');
 }
 
 namespace ForceValidateRequest {
-	export const type: RequestType<string, Diagnostic[], any, any> = new RequestType('json/validate');
+	export const type: RequestType<string, Diagnostic[], any> = new RequestType('json/validate');
 }
+
+namespace LanguageStatusRequest {
+	export const type: RequestType<string, JSONLanguageStatus, any> = new RequestType('json/languageStatus');
+}
+
 
 export interface ISchemaAssociations {
 	[pattern: string]: string[];
@@ -42,11 +49,11 @@ export interface ISchemaAssociation {
 }
 
 namespace SchemaAssociationNotification {
-	export const type: NotificationType<ISchemaAssociations | ISchemaAssociation[], any> = new NotificationType('json/schemaAssociations');
+	export const type: NotificationType<ISchemaAssociations | ISchemaAssociation[]> = new NotificationType('json/schemaAssociations');
 }
 
 namespace ResultLimitReachedNotification {
-	export const type: NotificationType<string, any> = new NotificationType('json/resultLimitReached');
+	export const type: NotificationType<string> = new NotificationType('json/resultLimitReached');
 }
 
 interface Settings {
@@ -73,6 +80,10 @@ namespace SettingIds {
 	export const maxItemsComputed = 'json.maxItemsComputed';
 }
 
+namespace StorageIds {
+	export const maxItemsExceededInformation = 'json.maxItemsExceededInformation';
+}
+
 export interface TelemetryReporter {
 	sendTelemetryEvent(eventName: string, properties?: {
 		[key: string]: string;
@@ -84,9 +95,15 @@ export interface TelemetryReporter {
 export type LanguageClientConstructor = (name: string, description: string, clientOptions: LanguageClientOptions) => CommonLanguageClient;
 
 export interface Runtime {
-	http: RequestService;
+	schemaRequests: SchemaRequestService;
 	telemetry?: TelemetryReporter
 }
+
+export interface SchemaRequestService {
+	getContent(uri: string): Promise<string>;
+}
+
+export const languageServerDescription = localize('jsonserver.name', 'JSON Language Server');
 
 export function startClient(context: ExtensionContext, newLanguageClient: LanguageClientConstructor, runtime: Runtime) {
 
@@ -97,12 +114,8 @@ export function startClient(context: ExtensionContext, newLanguageClient: Langua
 
 	const documentSelector = ['json', 'jsonc'];
 
-	const schemaResolutionErrorStatusBarItem = window.createStatusBarItem({
-		id: 'status.json.resolveError',
-		name: localize('json.resolveError', "JSON: Schema Resolution Error"),
-		alignment: StatusBarAlignment.Right,
-		priority: 0,
-	});
+	const schemaResolutionErrorStatusBarItem = window.createStatusBarItem('status.json.resolveError', StatusBarAlignment.Right, 0);
+	schemaResolutionErrorStatusBarItem.name = localize('json.resolveError', "JSON: Schema Resolution Error");
 	schemaResolutionErrorStatusBarItem.text = '$(alert)';
 	toDispose.push(schemaResolutionErrorStatusBarItem);
 
@@ -190,7 +203,7 @@ export function startClient(context: ExtensionContext, newLanguageClient: Langua
 	};
 
 	// Create the language client and start the client.
-	const client = newLanguageClient('json', localize('jsonserver.name', 'JSON Language Server'), clientOptions);
+	const client = newLanguageClient('json', languageServerDescription, clientOptions);
 	client.registerProposedFeatures();
 
 	const disposable = client.start();
@@ -220,7 +233,9 @@ export function startClient(context: ExtensionContext, newLanguageClient: Langua
 					 */
 					runtime.telemetry.sendTelemetryEvent('json.schema', { schemaURL: uriPath });
 				}
-				return runtime.http.getContent(uriPath);
+				return runtime.schemaRequests.getContent(uriPath).catch(e => {
+					return Promise.reject(new ResponseError(4, e.toString()));
+				});
 			} else {
 				return Promise.reject(new ResponseError(1, localize('schemaDownloadDisabled', 'Downloading schemas is disabled through setting \'{0}\'', SettingIds.enableSchemaDownload)));
 			}
@@ -233,7 +248,6 @@ export function startClient(context: ExtensionContext, newLanguageClient: Langua
 			}
 			return false;
 		};
-
 		const handleActiveEditorChange = (activeEditor?: TextEditor) => {
 			if (!activeEditor) {
 				return;
@@ -298,9 +312,22 @@ export function startClient(context: ExtensionContext, newLanguageClient: Langua
 			}
 		}));
 
-		client.onNotification(ResultLimitReachedNotification.type, message => {
-			window.showInformationMessage(`${message}\n${localize('configureLimit', 'Use setting \'{0}\' to configure the limit.', SettingIds.maxItemsComputed)}`);
+		client.onNotification(ResultLimitReachedNotification.type, async message => {
+			const shouldPrompt = context.globalState.get<boolean>(StorageIds.maxItemsExceededInformation) !== false;
+			if (shouldPrompt) {
+				const ok = localize('ok', "Ok");
+				const openSettings = localize('goToSetting', 'Open Settings');
+				const neverAgain = localize('yes never again', "Don't Show Again");
+				const pick = await window.showInformationMessage(`${message}\n${localize('configureLimit', 'Use setting \'{0}\' to configure the limit.', SettingIds.maxItemsComputed)}`, ok, openSettings, neverAgain);
+				if (pick === neverAgain) {
+					await context.globalState.update(StorageIds.maxItemsExceededInformation, false);
+				} else if (pick === openSettings) {
+					await commands.executeCommand('workbench.action.openSettings', SettingIds.maxItemsComputed);
+				}
+			}
 		});
+
+		toDispose.push(createLanguageStatusItem(documentSelector, (uri: string) => client.sendRequest(LanguageStatusRequest.type, uri)));
 
 		function updateFormatterRegistration() {
 			const formatEnabled = workspace.getConfiguration().get(SettingIds.enableFormatter);
@@ -310,11 +337,18 @@ export function startClient(context: ExtensionContext, newLanguageClient: Langua
 			} else if (formatEnabled && !rangeFormatting) {
 				rangeFormatting = languages.registerDocumentRangeFormattingEditProvider(documentSelector, {
 					provideDocumentRangeFormattingEdits(document: TextDocument, range: Range, options: FormattingOptions, token: CancellationToken): ProviderResult<TextEdit[]> {
+						const filesConfig = workspace.getConfiguration('files', document);
+						const fileFormattingOptions = {
+							trimTrailingWhitespace: filesConfig.get<boolean>('trimTrailingWhitespace'),
+							trimFinalNewlines: filesConfig.get<boolean>('trimFinalNewlines'),
+							insertFinalNewline: filesConfig.get<boolean>('insertFinalNewline'),
+						};
 						const params: DocumentRangeFormattingParams = {
 							textDocument: client.code2ProtocolConverter.asTextDocumentIdentifier(document),
 							range: client.code2ProtocolConverter.asRange(range),
-							options: client.code2ProtocolConverter.asFormattingOptions(options)
+							options: client.code2ProtocolConverter.asFormattingOptions(options, fileFormattingOptions)
 						};
+
 						return client.sendRequest(DocumentRangeFormattingRequest.type, params, token).then(
 							client.protocol2CodeConverter.asTextEdits,
 							(error) => {
@@ -340,17 +374,6 @@ export function startClient(context: ExtensionContext, newLanguageClient: Langua
 		}
 
 	});
-
-	const languageConfiguration: LanguageConfiguration = {
-		wordPattern: /("(?:[^\\\"]*(?:\\.)?)*"?)|[^\s{}\[\],:]+/,
-		indentationRules: {
-			increaseIndentPattern: /({+(?=([^"]*"[^"]*")*[^"}]*$))|(\[+(?=([^"]*"[^"]*")*[^"\]]*$))/,
-			decreaseIndentPattern: /^\s*[}\]],?\s*$/
-		}
-	};
-	languages.setLanguageConfiguration('json', languageConfiguration);
-	languages.setLanguageConfiguration('jsonc', languageConfiguration);
-
 }
 
 function getSchemaAssociations(_context: ExtensionContext): ISchemaAssociation[] {
@@ -368,7 +391,7 @@ function getSchemaAssociations(_context: ExtensionContext): ISchemaAssociation[]
 					if (Array.isArray(fileMatch) && typeof url === 'string') {
 						let uri: string = url;
 						if (uri[0] === '.' && uri[1] === '/') {
-							uri = joinPath(extension.extensionUri, uri).toString();
+							uri = Uri.joinPath(extension.extensionUri, uri).toString();
 						}
 						fileMatch = fileMatch.map(fm => {
 							if (fm[0] === '%') {
@@ -489,7 +512,7 @@ function getSchemaId(schema: JSONSchemaSettings, folderUri?: Uri): string | unde
 			url = schema.schema.id || `vscode://schemas/custom/${encodeURIComponent(hash(schema.schema).toString(16))}`;
 		}
 	} else if (folderUri && (url[0] === '.' || url[0] === '/')) {
-		url = joinPath(folderUri, url).toString();
+		url = Uri.joinPath(folderUri, url).toString();
 	}
 	return url;
 }

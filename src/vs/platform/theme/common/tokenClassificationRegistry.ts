@@ -3,14 +3,14 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import * as platform from 'vs/platform/registry/common/platform';
+import { RunOnceScheduler } from 'vs/base/common/async';
 import { Color } from 'vs/base/common/color';
-import { IColorTheme } from 'vs/platform/theme/common/themeService';
+import { Emitter, Event } from 'vs/base/common/event';
+import { IJSONSchema, IJSONSchemaMap } from 'vs/base/common/jsonSchema';
 import * as nls from 'vs/nls';
 import { Extensions as JSONExtensions, IJSONContributionRegistry } from 'vs/platform/jsonschemas/common/jsonContributionRegistry';
-import { RunOnceScheduler } from 'vs/base/common/async';
-import { Event, Emitter } from 'vs/base/common/event';
-import { IJSONSchema, IJSONSchemaMap } from 'vs/base/common/jsonSchema';
+import * as platform from 'vs/platform/registry/common/platform';
+import { IColorTheme } from 'vs/platform/theme/common/themeService';
 
 export const TOKEN_TYPE_WILDCARD = '*';
 export const TOKEN_CLASSIFIER_LANGUAGE_SEPARATOR = ':';
@@ -22,7 +22,7 @@ export type TokenClassificationString = string;
 export const idPattern = '\\w+[-_\\w+]*';
 export const typeAndModifierIdPattern = `^${idPattern}$`;
 
-export const selectorPattern = `^(${idPattern}|\\*)(\\${CLASSIFIER_MODIFIER_SEPARATOR}${idPattern})*(\\${TOKEN_CLASSIFIER_LANGUAGE_SEPARATOR}${idPattern})?$`;
+export const selectorPattern = `^(${idPattern}|\\*)(\\${CLASSIFIER_MODIFIER_SEPARATOR}${idPattern})*(${TOKEN_CLASSIFIER_LANGUAGE_SEPARATOR}${idPattern})?$`;
 
 export const fontStylePattern = '^(\\s*(italic|bold|underline))*\\s*$';
 
@@ -531,6 +531,7 @@ function createDefaultTokenClassificationRegistry(): TokenClassificationRegistry
 	registerTokenType('property', nls.localize('property', "Style for properties."), [['variable.other.property']]);
 	registerTokenType('enumMember', nls.localize('enumMember', "Style for enum members."), [['variable.other.enummember']]);
 	registerTokenType('event', nls.localize('event', "Style for events."), [['variable.other.event']]);
+	registerTokenType('decorator', nls.localize('decorator', "Style for decorators & annotations."), [['entity.name.decorator'], ['entity.name.function']]);
 
 	registerTokenType('label', nls.localize('labels', "Style for labels. "), undefined);
 
@@ -575,7 +576,7 @@ function getStylingSchemeEntry(description?: string, deprecationMessage?: string
 				format: 'color-hex'
 			},
 			{
-				$ref: '#definitions/style'
+				$ref: '#/definitions/style'
 			}
 		]
 	};

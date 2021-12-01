@@ -4,89 +4,15 @@
  *--------------------------------------------------------------------------------------------*/
 
 import * as path from 'path';
-import * as cp from 'child_process';
 import * as os from 'os';
-import * as fs from 'fs';
-import * as mkdirp from 'mkdirp';
-import { tmpName } from 'tmp';
-import { IDriver, connect as connectElectronDriver, IDisposable, IElement, Thenable } from './driver';
-import { connect as connectPlaywrightDriver, launch } from './playwrightDriver';
+import * as cp from 'child_process';
+import { IDriver, IDisposable, IElement, Thenable, ILocalizedStrings, ILocaleInfo } from './driver';
+import { launch as launchElectron } from './electronDriver';
+import { launch as launchPlaywright } from './playwrightDriver';
 import { Logger } from './logger';
-import { ncp } from 'ncp';
-import { URI } from 'vscode-uri';
+import { copyExtension } from './extensions';
 
 const repoPath = path.join(__dirname, '../../..');
-
-function getDevElectronPath(): string {
-	const buildPath = path.join(repoPath, '.build');
-	const product = require(path.join(repoPath, 'product.json'));
-
-	switch (process.platform) {
-		case 'darwin':
-			return path.join(buildPath, 'electron', `${product.nameLong}.app`, 'Contents', 'MacOS', 'Electron');
-		case 'linux':
-			return path.join(buildPath, 'electron', `${product.applicationName}`);
-		case 'win32':
-			return path.join(buildPath, 'electron', `${product.nameShort}.exe`);
-		default:
-			throw new Error('Unsupported platform.');
-	}
-}
-
-function getBuildElectronPath(root: string): string {
-	switch (process.platform) {
-		case 'darwin':
-			return path.join(root, 'Contents', 'MacOS', 'Electron');
-		case 'linux': {
-			const product = require(path.join(root, 'resources', 'app', 'product.json'));
-			return path.join(root, product.applicationName);
-		}
-		case 'win32': {
-			const product = require(path.join(root, 'resources', 'app', 'product.json'));
-			return path.join(root, `${product.nameShort}.exe`);
-		}
-		default:
-			throw new Error('Unsupported platform.');
-	}
-}
-
-function getDevOutPath(): string {
-	return path.join(repoPath, 'out');
-}
-
-function getBuildOutPath(root: string): string {
-	switch (process.platform) {
-		case 'darwin':
-			return path.join(root, 'Contents', 'Resources', 'app', 'out');
-		default:
-			return path.join(root, 'resources', 'app', 'out');
-	}
-}
-
-async function connect(connectDriver: typeof connectElectronDriver, child: cp.ChildProcess | undefined, outPath: string, handlePath: string, logger: Logger): Promise<Code> {
-	let errCount = 0;
-
-	while (true) {
-		try {
-			const { client, driver } = await connectDriver(outPath, handlePath);
-			return new Code(client, driver, logger);
-		} catch (err) {
-			if (++errCount > 50) {
-				if (child) {
-					child.kill();
-				}
-				throw err;
-			}
-
-			// retry
-			await new Promise(c => setTimeout(c, 100));
-		}
-	}
-}
-
-// Kill all running instances, when dead
-const instances = new Set<cp.ChildProcess>();
-process.once('exit', () => instances.forEach(code => code.kill()));
 
 export interface SpawnOptions {
 	codePath?: string;
@@ -97,101 +23,35 @@ export interface SpawnOptions {
 	verbose?: boolean;
 	extraArgs?: string[];
 	log?: string;
-	/** Run in the test resolver */
 	remote?: boolean;
-	/** Run in the web */
 	web?: boolean;
-	/** A specific browser to use (requires web: true) */
+	headless?: boolean;
 	browser?: 'chromium' | 'webkit' | 'firefox';
 }
 
-async function createDriverHandle(): Promise<string> {
-	if ('win32' === os.platform()) {
-		const name = [...Array(15)].map(() => Math.random().toString(36)[3]).join('');
-		return `\\\\.\\pipe\\${name}`;
-	} else {
-		return await new Promise<string>((c, e) => tmpName((err, handlePath) => err ? e(err) : c(handlePath)));
-	}
-}
-
 export async function spawn(options: SpawnOptions): Promise<Code> {
-	const handle = await createDriverHandle();
 
-	let child: cp.ChildProcess | undefined;
-	let connectDriver: typeof connectElectronDriver;
+	await copyExtension(repoPath, options.extensionsPath, 'vscode-notebook-tests');
 
-	copyExtension(options, 'vscode-notebook-tests');
-
+	// Browser smoke tests
 	if (options.web) {
-		await launch(options.userDataDir, options.workspacePath, options.codePath, options.extensionsPath);
-		connectDriver = connectPlaywrightDriver.bind(connectPlaywrightDriver, options.browser);
-		return connect(connectDriver, child, '', handle, options.logger);
+		return spawnBrowser(options);
 	}
 
-	const env = process.env;
-	const codePath = options.codePath;
-	const outPath = codePath ? getBuildOutPath(codePath) : getDevOutPath();
-
-	const args = [
-		options.workspacePath,
-		'--skip-release-notes',
-		'--disable-telemetry',
-		'--no-cached-data',
-		'--disable-updates',
-		'--disable-crash-reporter',
-		`--extensions-dir=${options.extensionsPath}`,
-		`--user-data-dir=${options.userDataDir}`,
-		'--driver', handle
-	];
-
-	if (options.remote) {
-		// Replace workspace path with URI
-		args[0] = `--${options.workspacePath.endsWith('.code-workspace') ? 'file' : 'folder'}-uri=vscode-remote://test+test/${URI.file(options.workspacePath).path}`;
-
-		if (codePath) {
-			// running against a build: copy the test resolver extension
-			copyExtension(options, 'vscode-test-resolver');
-		}
-		args.push('--enable-proposed-api=vscode.vscode-test-resolver');
-		const remoteDataDir = `${options.userDataDir}-server`;
-		mkdirp.sync(remoteDataDir);
-		env['TESTRESOLVER_DATA_FOLDER'] = remoteDataDir;
-	}
-
-
-	args.push('--enable-proposed-api=vscode.vscode-notebook-tests');
-
-	if (!codePath) {
-		args.unshift(repoPath);
-	}
-
-	if (options.verbose) {
-		args.push('--driver-verbose');
-	}
-
-	if (options.log) {
-		args.push('--log', options.log);
-	}
-
-	if (options.extraArgs) {
-		args.push(...options.extraArgs);
-	}
-
-	const electronPath = codePath ? getBuildElectronPath(codePath) : getDevElectronPath();
-	const spawnOptions: cp.SpawnOptions = { env };
-	child = cp.spawn(electronPath, args, spawnOptions);
-	instances.add(child);
-	child.once('exit', () => instances.delete(child!));
-	connectDriver = connectElectronDriver;
-	return connect(connectDriver, child, outPath, handle, options.logger);
+	// Electron smoke tests
+	return spawnElectron(options);
 }
 
-async function copyExtension(options: SpawnOptions, extId: string): Promise<void> {
-	const testResolverExtPath = path.join(options.extensionsPath, extId);
-	if (!fs.existsSync(testResolverExtPath)) {
-		const orig = path.join(repoPath, 'extensions', extId);
-		await new Promise((c, e) => ncp(orig, testResolverExtPath, err => err ? e(err) : c()));
-	}
+async function spawnBrowser(options: SpawnOptions): Promise<Code> {
+	const { serverProcess, client, driver } = await launchPlaywright(options.codePath, options.userDataDir, options.extensionsPath, options.workspacePath, Boolean(options.verbose), options);
+
+	return new Code(client, driver, options.logger, serverProcess);
+}
+
+async function spawnElectron(options: SpawnOptions): Promise<Code> {
+	const { electronProcess, client, driver } = await launchElectron(options.codePath, options.userDataDir, options.extensionsPath, options.workspacePath, Boolean(options.verbose), Boolean(options.remote), options.log, options.extraArgs);
+
+	return new Code(client, driver, options.logger, electronProcess);
 }
 
 async function poll<T>(
@@ -208,20 +68,19 @@ async function poll<T>(
 		if (trial > retryCount) {
 			console.error('** Timeout!');
 			console.error(lastError);
-
+			console.error(`*** Timeout: ${timeoutMessage} after ${(retryCount * retryInterval) / 1000} seconds.`);
 			throw new Error(`Timeout: ${timeoutMessage} after ${(retryCount * retryInterval) / 1000} seconds.`);
 		}
 
 		let result;
 		try {
 			result = await fn();
-
 			if (acceptFn(result)) {
 				return result;
 			} else {
 				lastError = 'Did not pass accept function';
 			}
-		} catch (e) {
+		} catch (e: any) {
 			lastError = Array.isArray(e.stack) ? e.stack.join(os.EOL) : e.stack;
 		}
 
@@ -233,12 +92,13 @@ async function poll<T>(
 export class Code {
 
 	private _activeWindowId: number | undefined = undefined;
-	private driver: IDriver;
+	driver: IDriver;
 
 	constructor(
 		private client: IDisposable,
 		driver: IDriver,
-		readonly logger: Logger
+		readonly logger: Logger,
+		private readonly mainProcess: cp.ChildProcess
 	) {
 		this.driver = new Proxy(driver, {
 			get(target, prop, receiver) {
@@ -273,29 +133,58 @@ export class Code {
 		await this.driver.dispatchKeybinding(windowId, keybinding);
 	}
 
-	async reload(): Promise<void> {
-		const windowId = await this.getActiveWindowId();
-		await this.driver.reloadWindow(windowId);
-	}
-
 	async exit(): Promise<void> {
-		await this.driver.exitApplication();
+		return new Promise<void>((resolve, reject) => {
+			let done = false;
+
+			// Start the exit flow via driver
+			this.driver.exitApplication().then(veto => {
+				if (veto) {
+					done = true;
+					reject(new Error('Smoke test exit call resulted in unexpected veto'));
+				}
+			});
+
+			// Await the exit of the application
+			(async () => {
+				let retries = 0;
+				while (!done) {
+					retries++;
+
+					if (retries > 40) {
+						done = true;
+						reject(new Error('Smoke test exit call did not terminate process after 20s, giving up'));
+					}
+
+					try {
+						process.kill(this.mainProcess.pid!, 0); // throws an exception if the process doesn't exist anymore.
+						await new Promise(resolve => setTimeout(resolve, 500));
+					} catch (error) {
+						done = true;
+						resolve();
+					}
+				}
+			})();
+		}).finally(() => {
+			this.dispose();
+		});
 	}
 
-	async waitForTextContent(selector: string, textContent?: string, accept?: (result: string) => boolean): Promise<string> {
+	async waitForTextContent(selector: string, textContent?: string, accept?: (result: string) => boolean, retryCount?: number): Promise<string> {
 		const windowId = await this.getActiveWindowId();
 		accept = accept || (result => textContent !== undefined ? textContent === result : !!result);
 
 		return await poll(
 			() => this.driver.getElements(windowId, selector).then(els => els.length > 0 ? Promise.resolve(els[0].textContent) : Promise.reject(new Error('Element not found for textContent'))),
 			s => accept!(typeof s === 'string' ? s : ''),
-			`get text content '${selector}'`
+			`get text content '${selector}'`,
+			retryCount
 		);
 	}
 
-	async waitAndClick(selector: string, xoffset?: number, yoffset?: number): Promise<void> {
+	async waitAndClick(selector: string, xoffset?: number, yoffset?: number, retryCount: number = 200): Promise<void> {
 		const windowId = await this.getActiveWindowId();
-		await poll(() => this.driver.click(windowId, selector, xoffset, yoffset), () => true, `click '${selector}'`);
+		await poll(() => this.driver.click(windowId, selector, xoffset, yoffset), () => true, `click '${selector}'`, retryCount);
 	}
 
 	async waitAndDoubleClick(selector: string): Promise<void> {
@@ -341,6 +230,16 @@ export class Code {
 	async writeInTerminal(selector: string, value: string): Promise<void> {
 		const windowId = await this.getActiveWindowId();
 		await poll(() => this.driver.writeInTerminal(windowId, selector, value), () => true, `writeInTerminal '${selector}'`);
+	}
+
+	async getLocaleInfo(): Promise<ILocaleInfo> {
+		const windowId = await this.getActiveWindowId();
+		return await this.driver.getLocaleInfo(windowId);
+	}
+
+	async getLocalizedStrings(): Promise<ILocalizedStrings> {
+		const windowId = await this.getActiveWindowId();
+		return await this.driver.getLocalizedStrings(windowId);
 	}
 
 	private async getActiveWindowId(): Promise<number> {

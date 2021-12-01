@@ -19,7 +19,7 @@ import { IConfigurationService } from 'vs/platform/configuration/common/configur
 import { URI } from 'vs/base/common/uri';
 import { ISCMService, ISCMRepository, ISCMProvider } from 'vs/workbench/contrib/scm/common/scm';
 import { ModelDecorationOptions } from 'vs/editor/common/model/textModel';
-import { registerThemingParticipant, IColorTheme, ICssStyleCollector, themeColorFromId, IThemeService } from 'vs/platform/theme/common/themeService';
+import { registerThemingParticipant, IColorTheme, ICssStyleCollector, themeColorFromId, IThemeService, ThemeIcon } from 'vs/platform/theme/common/themeService';
 import { registerColor, transparent } from 'vs/platform/theme/common/colorRegistry';
 import { Color, RGBA } from 'vs/base/common/color';
 import { ICodeEditor, IEditorMouseEvent, MouseTargetType } from 'vs/editor/browser/editorBrowser';
@@ -34,7 +34,7 @@ import { KeybindingsRegistry, KeybindingWeight } from 'vs/platform/keybinding/co
 import { EmbeddedDiffEditorWidget } from 'vs/editor/browser/widget/embeddedCodeEditorWidget';
 import { IDiffEditorOptions, EditorOption } from 'vs/editor/common/config/editorOptions';
 import { Action, IAction, ActionRunner } from 'vs/base/common/actions';
-import { IActionBarOptions, ActionsOrientation } from 'vs/base/browser/ui/actionbar/actionbar';
+import { IActionBarOptions } from 'vs/base/browser/ui/actionbar/actionbar';
 import { IKeybindingService } from 'vs/platform/keybinding/common/keybinding';
 import { basename, isEqualOrParent } from 'vs/base/common/resources';
 import { MenuId, IMenuService, IMenu, MenuItemAction, MenuRegistry } from 'vs/platform/actions/common/actions';
@@ -46,12 +46,16 @@ import { IMarginData } from 'vs/editor/browser/controller/mouseTarget';
 import { ICodeEditorService } from 'vs/editor/browser/services/codeEditorService';
 import { ISplice } from 'vs/base/common/sequence';
 import { createStyleSheet } from 'vs/base/browser/dom';
-import { ITextFileEditorModel, IResolvedTextFileEditorModel, ITextFileService, isTextFileEditorModel } from 'vs/workbench/services/textfile/common/textfiles';
-import { EncodingMode } from 'vs/workbench/common/editor';
+import { EncodingMode, ITextFileEditorModel, IResolvedTextFileEditorModel, ITextFileService, isTextFileEditorModel } from 'vs/workbench/services/textfile/common/textfiles';
+import { gotoNextLocation, gotoPreviousLocation } from 'vs/platform/theme/common/iconRegistry';
+import { Codicon } from 'vs/base/common/codicons';
+import { onUnexpectedError } from 'vs/base/common/errors';
+import { TextCompareEditorActiveContext } from 'vs/workbench/common/editor';
+import { IProgressService, ProgressLocation } from 'vs/platform/progress/common/progress';
 
 class DiffActionRunner extends ActionRunner {
 
-	runAction(action: IAction, context: any): Promise<any> {
+	override runAction(action: IAction, context: any): Promise<any> {
 		if (action instanceof MenuItemAction) {
 			return action.run(...context);
 		}
@@ -119,7 +123,7 @@ class UIEditorAction extends Action {
 		this.editor = editor;
 	}
 
-	run(): Promise<any> {
+	override run(): Promise<any> {
 		return Promise.resolve(this.instantiationService.invokeFunction(accessor => this.action.run(accessor, this.editor, null)));
 	}
 }
@@ -168,7 +172,6 @@ class DirtyDiffWidget extends PeekViewWidget {
 	private index: number = 0;
 	private change: IChange | undefined;
 	private height: number | undefined = undefined;
-	private contextKeyService: IContextKeyService;
 
 	constructor(
 		editor: ICodeEditor,
@@ -176,16 +179,18 @@ class DirtyDiffWidget extends PeekViewWidget {
 		@IThemeService private readonly themeService: IThemeService,
 		@IInstantiationService instantiationService: IInstantiationService,
 		@IMenuService menuService: IMenuService,
-		@IContextKeyService contextKeyService: IContextKeyService
+		@IContextKeyService _contextKeyService: IContextKeyService
 	) {
 		super(editor, { isResizeable: true, frameWidth: 1, keepEditorSelection: true }, instantiationService);
 
 		this._disposables.add(themeService.onDidColorThemeChange(this._applyTheme, this));
 		this._applyTheme(themeService.getColorTheme());
 
-		this.contextKeyService = contextKeyService.createScoped();
-		this.contextKeyService.createKey('originalResourceScheme', this.model.original!.uri.scheme);
-		this.menu = menuService.createMenu(MenuId.SCMChangeContext, this.contextKeyService);
+		const contextKeyService = _contextKeyService.createOverlay([
+			['originalResourceScheme', this.model.original!.uri.scheme]
+		]);
+		this.menu = menuService.createMenu(MenuId.SCMChangeContext, contextKeyService);
+		this._disposables.add(this.menu);
 
 		this.create();
 		if (editor.hasModel()) {
@@ -243,22 +248,23 @@ class DirtyDiffWidget extends PeekViewWidget {
 		this.setTitle(this.title, detail);
 	}
 
-	protected _fillHead(container: HTMLElement): void {
-		super._fillHead(container);
+	protected override _fillHead(container: HTMLElement): void {
+		super._fillHead(container, true);
 
-		const previous = this.instantiationService.createInstance(UIEditorAction, this.editor, new ShowPreviousChangeAction(), 'codicon-arrow-up');
-		const next = this.instantiationService.createInstance(UIEditorAction, this.editor, new ShowNextChangeAction(), 'codicon-arrow-down');
+		const previous = this.instantiationService.createInstance(UIEditorAction, this.editor, new ShowPreviousChangeAction(), ThemeIcon.asClassName(gotoPreviousLocation));
+		const next = this.instantiationService.createInstance(UIEditorAction, this.editor, new ShowNextChangeAction(), ThemeIcon.asClassName(gotoNextLocation));
 
 		this._disposables.add(previous);
 		this._disposables.add(next);
-		this._actionbarWidget!.push([previous, next], { label: false, icon: true });
 
 		const actions: IAction[] = [];
 		this._disposables.add(createAndFillInActionBarActions(this.menu, { shouldForwardArgs: true }, actions));
-		this._actionbarWidget!.push(actions, { label: false, icon: true });
+		this._actionbarWidget!.push(actions.reverse(), { label: false, icon: true });
+		this._actionbarWidget!.push([next, previous], { label: false, icon: true });
+		this._actionbarWidget!.push(new Action('peekview.close', nls.localize('label.close', "Close"), Codicon.close.classNames, true, () => this.dispose()), { label: false, icon: true });
 	}
 
-	protected _getActionBarOptions(): IActionBarOptions {
+	protected override _getActionBarOptions(): IActionBarOptions {
 		const actionRunner = new DiffActionRunner();
 
 		// close widget on successful action
@@ -270,8 +276,7 @@ class DirtyDiffWidget extends PeekViewWidget {
 
 		return {
 			...super._getActionBarOptions(),
-			actionRunner,
-			orientation: ActionsOrientation.HORIZONTAL_REVERSE
+			actionRunner
 		};
 	}
 
@@ -290,13 +295,14 @@ class DirtyDiffWidget extends PeekViewWidget {
 			minimap: { enabled: false },
 			renderSideBySide: false,
 			readOnly: false,
-			ignoreTrimWhitespace: false
+			renderIndicators: false
 		};
 
 		this.diffEditor = this.instantiationService.createInstance(EmbeddedDiffEditorWidget, container, options, this.editor);
+		this._disposables.add(this.diffEditor);
 	}
 
-	_onWidth(width: number): void {
+	override _onWidth(width: number): void {
 		if (typeof this.height === 'undefined') {
 			return;
 		}
@@ -304,7 +310,7 @@ class DirtyDiffWidget extends PeekViewWidget {
 		this.diffEditor.layout({ height: this.height, width });
 	}
 
-	protected _doLayoutBody(height: number, width: number): void {
+	protected override _doLayoutBody(height: number, width: number): void {
 		super._doLayoutBody(height, width);
 		this.diffEditor.layout({ height, width });
 
@@ -343,7 +349,7 @@ class DirtyDiffWidget extends PeekViewWidget {
 		});
 	}
 
-	protected revealLine(lineNumber: number) {
+	protected override revealLine(lineNumber: number) {
 		this.editor.revealLineInCenterIfOutsideViewport(lineNumber, ScrollType.Smooth);
 	}
 
@@ -359,7 +365,7 @@ export class ShowPreviousChangeAction extends EditorAction {
 			id: 'editor.action.dirtydiff.previous',
 			label: nls.localize('show previous change', "Show Previous Change"),
 			alias: 'Show Previous Change',
-			precondition: undefined,
+			precondition: TextCompareEditorActiveContext.toNegated(),
 			kbOpts: { kbExpr: EditorContextKeys.editorTextFocus, primary: KeyMod.Shift | KeyMod.Alt | KeyCode.F3, weight: KeybindingWeight.EditorContrib }
 		});
 	}
@@ -393,7 +399,7 @@ export class ShowNextChangeAction extends EditorAction {
 			id: 'editor.action.dirtydiff.next',
 			label: nls.localize('show next change', "Show Next Change"),
 			alias: 'Show Next Change',
-			precondition: undefined,
+			precondition: TextCompareEditorActiveContext.toNegated(),
 			kbOpts: { kbExpr: EditorContextKeys.editorTextFocus, primary: KeyMod.Alt | KeyCode.F3, weight: KeybindingWeight.EditorContrib }
 		});
 	}
@@ -439,14 +445,14 @@ MenuRegistry.appendMenuItem(MenuId.MenubarGoMenu, {
 	order: 2
 });
 
-export class MoveToPreviousChangeAction extends EditorAction {
+export class GotoPreviousChangeAction extends EditorAction {
 
 	constructor() {
 		super({
 			id: 'workbench.action.editor.previousChange',
-			label: nls.localize('move to previous change', "Move to Previous Change"),
-			alias: 'Move to Previous Change',
-			precondition: undefined,
+			label: nls.localize('move to previous change', "Go to Previous Change"),
+			alias: 'Go to Previous Change',
+			precondition: TextCompareEditorActiveContext.toNegated(),
 			kbOpts: { kbExpr: EditorContextKeys.editorTextFocus, primary: KeyMod.Shift | KeyMod.Alt | KeyCode.F5, weight: KeybindingWeight.EditorContrib }
 		});
 	}
@@ -479,16 +485,16 @@ export class MoveToPreviousChangeAction extends EditorAction {
 		outerEditor.revealPositionInCenter(position);
 	}
 }
-registerEditorAction(MoveToPreviousChangeAction);
+registerEditorAction(GotoPreviousChangeAction);
 
-export class MoveToNextChangeAction extends EditorAction {
+export class GotoNextChangeAction extends EditorAction {
 
 	constructor() {
 		super({
 			id: 'workbench.action.editor.nextChange',
-			label: nls.localize('move to next change', "Move to Next Change"),
-			alias: 'Move to Next Change',
-			precondition: undefined,
+			label: nls.localize('move to next change', "Go to Next Change"),
+			alias: 'Go to Next Change',
+			precondition: TextCompareEditorActiveContext.toNegated(),
 			kbOpts: { kbExpr: EditorContextKeys.editorTextFocus, primary: KeyMod.Alt | KeyCode.F5, weight: KeybindingWeight.EditorContrib }
 		});
 	}
@@ -521,7 +527,7 @@ export class MoveToNextChangeAction extends EditorAction {
 		outerEditor.revealPositionInCenter(position);
 	}
 }
-registerEditorAction(MoveToNextChangeAction);
+registerEditorAction(GotoNextChangeAction);
 
 KeybindingsRegistry.registerCommandAndKeybindingRule({
 	id: 'closeDirtyDiff',
@@ -836,7 +842,7 @@ export class DirtyDiffController extends Disposable implements IEditorContributi
 		return model.changes;
 	}
 
-	dispose(): void {
+	override dispose(): void {
 		this.gutterActionDisposables.dispose();
 		super.dispose();
 	}
@@ -886,6 +892,7 @@ class DirtyDiffDecorator extends Disposable {
 
 	static createDecoration(className: string, options: { gutter: boolean, overview: { active: boolean, color: string }, minimap: { active: boolean, color: string }, isWholeLine: boolean }): ModelDecorationOptions {
 		const decorationOptions: IModelDecorationOptions = {
+			description: 'dirty-diff-decoration',
 			isWholeLine: options.isWholeLine,
 		};
 
@@ -990,7 +997,7 @@ class DirtyDiffDecorator extends Disposable {
 		this.decorations = this.editorModel.deltaDecorations(this.decorations, decorations);
 	}
 
-	dispose(): void {
+	override dispose(): void {
 		super.dispose();
 
 		if (this.editorModel && !this.editorModel.isDisposed()) {
@@ -1081,12 +1088,19 @@ export class DirtyDiffModel extends Disposable {
 		textFileModel: IResolvedTextFileEditorModel,
 		@ISCMService private readonly scmService: ISCMService,
 		@IEditorWorkerService private readonly editorWorkerService: IEditorWorkerService,
-		@ITextModelService private readonly textModelResolverService: ITextModelService
+		@IConfigurationService private readonly configurationService: IConfigurationService,
+		@ITextModelService private readonly textModelResolverService: ITextModelService,
+		@IProgressService private readonly progressService: IProgressService,
 	) {
 		super();
 		this._model = textFileModel;
 
 		this._register(textFileModel.textEditorModel.onDidChangeContent(() => this.triggerDiff()));
+		this._register(
+			Event.filter(configurationService.onDidChangeConfiguration,
+				e => e.affectsConfiguration('scm.diffDecorationsIgnoreTrimWhitespace') || e.affectsConfiguration('diffEditor.ignoreTrimWhitespace')
+			)(this.triggerDiff, this)
+		);
 		this._register(scmService.onDidAddRepository(this.onDidAddRepository, this));
 		scmService.repositories.forEach(r => this.onDidAddRepository(r));
 
@@ -1138,7 +1152,7 @@ export class DirtyDiffModel extends Disposable {
 				}
 
 				this.setChanges(changes);
-			});
+			}, (err) => onUnexpectedError(err));
 	}
 
 	private setChanges(changes: IChange[]): void {
@@ -1148,16 +1162,23 @@ export class DirtyDiffModel extends Disposable {
 	}
 
 	private diff(): Promise<IChange[] | null> {
-		return this.getOriginalURIPromise().then(originalURI => {
-			if (this._disposed || this._model.isDisposed() || !originalURI) {
-				return Promise.resolve([]); // disposed
-			}
+		return this.progressService.withProgress({ location: ProgressLocation.Scm, delay: 250 }, async () => {
+			return this.getOriginalURIPromise().then(originalURI => {
+				if (this._disposed || this._model.isDisposed() || !originalURI) {
+					return Promise.resolve([]); // disposed
+				}
 
-			if (!this.editorWorkerService.canComputeDirtyDiff(originalURI, this._model.resource)) {
-				return Promise.resolve([]); // Files too large
-			}
+				if (!this.editorWorkerService.canComputeDirtyDiff(originalURI, this._model.resource)) {
+					return Promise.resolve([]); // Files too large
+				}
 
-			return this.editorWorkerService.computeDirtyDiff(originalURI, this._model.resource, false);
+				const ignoreTrimWhitespaceSetting = this.configurationService.getValue<'true' | 'false' | 'inherit'>('scm.diffDecorationsIgnoreTrimWhitespace');
+				const ignoreTrimWhitespace = ignoreTrimWhitespaceSetting === 'inherit'
+					? this.configurationService.getValue<boolean>('diffEditor.ignoreTrimWhitespace')
+					: ignoreTrimWhitespaceSetting !== 'false';
+
+				return this.editorWorkerService.computeDirtyDiff(originalURI, this._model.resource, ignoreTrimWhitespace);
+			});
 		});
 	}
 
@@ -1258,7 +1279,7 @@ export class DirtyDiffModel extends Disposable {
 		return this.changes.length - 1;
 	}
 
-	dispose(): void {
+	override dispose(): void {
 		super.dispose();
 
 		this._disposed = true;
@@ -1429,7 +1450,7 @@ export class DirtyDiffWorkbenchController extends Disposable implements ext.IWor
 		return null;
 	}
 
-	dispose(): void {
+	override dispose(): void {
 		this.disable();
 		super.dispose();
 	}

@@ -130,6 +130,7 @@ export interface CommitOptions {
 	signoff?: boolean;
 	signCommit?: boolean;
 	empty?: boolean;
+	noVerify?: boolean;
 }
 
 export interface BranchQuery {
@@ -211,7 +212,14 @@ export interface RemoteSourceProvider {
 	readonly icon?: string; // codicon name
 	readonly supportsQuery?: boolean;
 	getRemoteSources(query?: string): ProviderResult<RemoteSource[]>;
+	getBranches?(url: string): ProviderResult<string[]>;
 	publishRepository?(repository: Repository): Promise<void>;
+}
+
+export interface RemoteSourcePublisher {
+	readonly name: string;
+	readonly icon?: string; // codicon name
+	publishRepository(repository: Repository): Promise<void>;
 }
 
 export interface Credentials {
@@ -241,6 +249,7 @@ export interface API {
 	getRepository(uri: Uri): Repository | null;
 	init(root: Uri): Promise<Repository | null>;
 
+	registerRemoteSourcePublisher(publisher: RemoteSourcePublisher): Disposable;
 	registerRemoteSourceProvider(provider: RemoteSourceProvider): Disposable;
 	registerCredentialsProvider(provider: CredentialsProvider): Disposable;
 	registerPushErrorHandler(handler: PushErrorHandler): Disposable;

@@ -6,14 +6,14 @@
 import { IState } from 'vs/editor/common/modes';
 
 export class Token {
-	_tokenBrand: void;
+	_tokenBrand: void = undefined;
 
 	public readonly offset: number;
 	public readonly type: string;
 	public readonly language: string;
 
 	constructor(offset: number, type: string, language: string) {
-		this.offset = offset | 0;// @perf
+		this.offset = offset;
 		this.type = type;
 		this.language = language;
 	}
@@ -24,7 +24,7 @@ export class Token {
 }
 
 export class TokenizationResult {
-	_tokenizationResultBrand: void;
+	_tokenizationResultBrand: void = undefined;
 
 	public readonly tokens: Token[];
 	public readonly endState: IState;
@@ -36,7 +36,7 @@ export class TokenizationResult {
 }
 
 export class TokenizationResult2 {
-	_tokenizationResult2Brand: void;
+	_tokenizationResult2Brand: void = undefined;
 
 	/**
 	 * The tokens in binary format. Each token occupies two array indices. For token i:

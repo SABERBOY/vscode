@@ -3,7 +3,6 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { mergeSort } from 'vs/base/common/arrays';
 import { dispose, IDisposable, IReference } from 'vs/base/common/lifecycle';
 import { URI } from 'vs/base/common/uri';
 import { ICodeEditor } from 'vs/editor/browser/editorBrowser';
@@ -19,6 +18,7 @@ import { SingleModelEditStackElement, MultiModelEditStackElement } from 'vs/edit
 import { ResourceMap } from 'vs/base/common/map';
 import { IModelService } from 'vs/editor/common/services/modelService';
 import { ResourceTextEdit } from 'vs/editor/browser/services/bulkEditService';
+import { CancellationToken } from 'vs/base/common/cancellation';
 
 type ValidationResult = { canApply: true } | { canApply: false, reason: URI };
 
@@ -91,7 +91,7 @@ class ModelEditTask implements IDisposable {
 
 	apply(): void {
 		if (this._edits.length > 0) {
-			this._edits = mergeSort(this._edits, (a, b) => Range.compareRangesUsingStarts(a.range, b.range));
+			this._edits = this._edits.sort((a, b) => Range.compareRangesUsingStarts(a.range, b.range));
 			this.model.pushEditOperations(null, this._edits, () => null);
 		}
 		if (this._newEol !== undefined) {
@@ -102,20 +102,28 @@ class ModelEditTask implements IDisposable {
 
 class EditorEditTask extends ModelEditTask {
 
-	private _editor: ICodeEditor;
+	private readonly _editor: ICodeEditor;
 
 	constructor(modelReference: IReference<IResolvedTextEditorModel>, editor: ICodeEditor) {
 		super(modelReference);
 		this._editor = editor;
 	}
 
-	getBeforeCursorState(): Selection[] | null {
-		return this._editor.getSelections();
+	override getBeforeCursorState(): Selection[] | null {
+		return this._canUseEditor() ? this._editor.getSelections() : null;
 	}
 
-	apply(): void {
+	override apply(): void {
+
+		// Check that the editor is still for the wanted model. It might have changed in the
+		// meantime and that means we cannot use the editor anymore (instead we perform the edit through the model)
+		if (!this._canUseEditor()) {
+			super.apply();
+			return;
+		}
+
 		if (this._edits.length > 0) {
-			this._edits = mergeSort(this._edits, (a, b) => Range.compareRangesUsingStarts(a.range, b.range));
+			this._edits = this._edits.sort((a, b) => Range.compareRangesUsingStarts(a.range, b.range));
 			this._editor.executeEdits('', this._edits);
 		}
 		if (this._newEol !== undefined) {
@@ -123,6 +131,10 @@ class EditorEditTask extends ModelEditTask {
 				this._editor.getModel().pushEOL(this._newEol);
 			}
 		}
+	}
+
+	private _canUseEditor(): boolean {
+		return this._editor?.getModel()?.uri.toString() === this.model.uri.toString();
 	}
 }
 
@@ -136,6 +148,7 @@ export class BulkTextEdits {
 		private readonly _undoRedoGroup: UndoRedoGroup,
 		private readonly _undoRedoSource: UndoRedoSource | undefined,
 		private readonly _progress: IProgress<void>,
+		private readonly _token: CancellationToken,
 		edits: ResourceTextEdit[],
 		@IEditorWorkerService private readonly _editorWorker: IEditorWorkerService,
 		@IModelService private readonly _modelService: IModelService,
@@ -223,6 +236,9 @@ export class BulkTextEdits {
 		this._validateBeforePrepare();
 		const tasks = await this._createEditsTasks();
 
+		if (this._token.isCancellationRequested) {
+			return;
+		}
 		try {
 
 			const validation = this._validateTasks(tasks);

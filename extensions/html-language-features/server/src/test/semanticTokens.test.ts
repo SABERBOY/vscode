@@ -7,7 +7,7 @@ import 'mocha';
 import * as assert from 'assert';
 import { TextDocument, getLanguageModes, ClientCapabilities, Range, Position } from '../modes/languageModes';
 import { newSemanticTokenProvider } from '../modes/semanticTokens';
-import { getNodeFSRequestService } from '../node/nodeFs';
+import { getNodeFileFS } from '../node/nodeFs';
 
 interface ExpectedToken {
 	startLine: number;
@@ -22,7 +22,7 @@ async function assertTokens(lines: string[], expected: ExpectedToken[], ranges?:
 		settings: {},
 		folders: [{ name: 'foo', uri: 'test://foo' }]
 	};
-	const languageModes = getLanguageModes({ css: true, javascript: true }, workspace, ClientCapabilities.LATEST, getNodeFSRequestService());
+	const languageModes = getLanguageModes({ css: true, javascript: true }, workspace, ClientCapabilities.LATEST, getNodeFileFS());
 	const semanticTokensProvider = newSemanticTokenProvider(languageModes);
 
 	const legend = semanticTokensProvider.legend;
@@ -40,7 +40,7 @@ async function assertTokens(lines: string[], expected: ExpectedToken[], ranges?:
 		lastLine = line;
 		lastCharacter = character;
 	}
-	assert.deepEqual(actualRanges, expected, message);
+	assert.deepStrictEqual(actualRanges, expected, message);
 }
 
 function t(startLine: number, character: number, length: number, tokenClassifiction: string): ExpectedToken {
@@ -115,9 +115,9 @@ suite('HTML Semantic Tokens', () => {
 			t(3, 8, 1, 'class.declaration'),
 			t(4, 11, 1, 'property.declaration.static'),
 			t(5, 4, 1, 'property.declaration'),
-			t(6, 10, 1, 'member.declaration.async'), t(6, 23, 1, 'class'), t(6, 25, 1, 'property.static'), t(6, 40, 1, 'member.async'),
+			t(6, 10, 1, 'method.declaration.async'), t(6, 23, 1, 'class'), t(6, 25, 1, 'property.static'), t(6, 40, 1, 'method.async'),
 			t(7, 8, 1, 'property.declaration'), t(7, 26, 1, 'property'),
-			t(8, 11, 1, 'member.declaration.static'), t(8, 28, 1, 'class'), t(8, 32, 1, 'property'),
+			t(8, 11, 1, 'method.declaration.static'), t(8, 28, 1, 'class'), t(8, 32, 1, 'property'),
 		]);
 	});
 

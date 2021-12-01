@@ -3,11 +3,12 @@
   "displayName": "%displayName%",
   "description": "%description%",
   "publisher": "vscode",
+  "license": "MIT",
   "version": "0.0.1",
   "engines": {
     "vscode": "^1.41.0"
   },
-  "enableProposedApi": true,
+  "icon": "images/icon.png",
   "categories": [
     "Other"
   ],
@@ -15,9 +16,15 @@
     "*"
   ],
   "extensionDependencies": [
-    "vscode.git"
+    "vscode.git-base"
   ],
   "main": "./out/extension.js",
+  "capabilities": {
+    "virtualWorkspaces": false,
+    "untrustedWorkspaces": {
+      "supported": true
+    }
+  },
   "contributes": {
     "commands": [
       {
@@ -25,6 +32,14 @@
         "title": "Publish to GitHub"
       }
     ],
+    "menus": {
+      "commandPalette": [
+        {
+          "command": "github.publish",
+          "when": "git-base.gitEnabled"
+        }
+      ]
+    },
     "configuration": [
       {
         "title": "GitHub",
@@ -62,6 +77,10 @@
     "vscode-nls": "^4.1.2"
   },
   "devDependencies": {
-    "@types/node": "^10.12.21"
+    "@types/node": "14.x"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/microsoft/vscode.git"
   }
 }

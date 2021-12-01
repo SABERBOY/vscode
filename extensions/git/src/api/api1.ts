@@ -5,12 +5,13 @@
 
 import { Model } from '../model';
 import { Repository as BaseRepository, Resource } from '../repository';
-import { InputBox, Git, API, Repository, Remote, RepositoryState, Branch, Ref, Submodule, Commit, Change, RepositoryUIState, Status, LogOptions, APIState, CommitOptions, RefType, RemoteSourceProvider, CredentialsProvider, BranchQuery, PushErrorHandler } from './git';
+import { InputBox, Git, API, Repository, Remote, RepositoryState, Branch, ForcePushMode, Ref, Submodule, Commit, Change, RepositoryUIState, Status, LogOptions, APIState, CommitOptions, RefType, CredentialsProvider, BranchQuery, PushErrorHandler, PublishEvent, FetchOptions, RemoteSourceProvider, RemoteSourcePublisher } from './git';
 import { Event, SourceControlInputBox, Uri, SourceControl, Disposable, commands } from 'vscode';
-import { mapEvent } from '../util';
+import { combinedDisposable, mapEvent } from '../util';
 import { toGitUri } from '../uri';
-import { pickRemoteSource, PickRemoteSourceOptions } from '../remoteSource';
 import { GitExtensionImpl } from './extension';
+import { GitBaseApi } from '../git-base';
+import { PickRemoteSourceOptions } from './git-base';
 
 class ApiInputBox implements InputBox {
 	set value(value: string) { this._inputBox.value = value; }
@@ -193,16 +194,24 @@ export class ApiRepository implements Repository {
 		return this._repository.renameRemote(name, newName);
 	}
 
-	fetch(remote?: string | undefined, ref?: string | undefined, depth?: number | undefined): Promise<void> {
-		return this._repository.fetch(remote, ref, depth);
+	fetch(arg0?: FetchOptions | string | undefined,
+		ref?: string | undefined,
+		depth?: number | undefined,
+		prune?: boolean | undefined
+	): Promise<void> {
+		if (arg0 !== undefined && typeof arg0 !== 'string') {
+			return this._repository.fetch(arg0);
+		}
+
+		return this._repository.fetch({ remote: arg0, ref, depth, prune });
 	}
 
 	pull(unshallow?: boolean): Promise<void> {
 		return this._repository.pull(undefined, unshallow);
 	}
 
-	push(remoteName?: string, branchName?: string, setUpstream: boolean = false): Promise<void> {
-		return this._repository.pushTo(remoteName, branchName, setUpstream);
+	push(remoteName?: string, branchName?: string, setUpstream: boolean = false, force?: ForcePushMode): Promise<void> {
+		return this._repository.pushTo(remoteName, branchName, setUpstream, force);
 	}
 
 	blame(path: string): Promise<string> {
@@ -237,6 +246,10 @@ export class ApiImpl implements API {
 		return this._model.onDidChangeState;
 	}
 
+	get onDidPublish(): Event<PublishEvent> {
+		return this._model.onDidPublish;
+	}
+
 	get onDidOpenRepository(): Event<Repository> {
 		return mapEvent(this._model.onDidOpenRepository, r => new ApiRepository(r));
 	}
@@ -265,8 +278,24 @@ export class ApiImpl implements API {
 		return this.getRepository(root) || null;
 	}
 
+	async openRepository(root: Uri): Promise<Repository | null> {
+		await this._model.openRepository(root.fsPath);
+		return this.getRepository(root) || null;
+	}
+
 	registerRemoteSourceProvider(provider: RemoteSourceProvider): Disposable {
-		return this._model.registerRemoteSourceProvider(provider);
+		const disposables: Disposable[] = [];
+
+		if (provider.publishRepository) {
+			disposables.push(this._model.registerRemoteSourcePublisher(provider as RemoteSourcePublisher));
+		}
+		disposables.push(GitBaseApi.getAPI().registerRemoteSourceProvider(provider));
+
+		return combinedDisposable(disposables);
+	}
+
+	registerRemoteSourcePublisher(publisher: RemoteSourcePublisher): Disposable {
+		return this._model.registerRemoteSourcePublisher(publisher);
 	}
 
 	registerCredentialsProvider(provider: CredentialsProvider): Disposable {
@@ -353,11 +382,7 @@ export function registerAPICommands(extension: GitExtensionImpl): Disposable {
 	}));
 
 	disposables.push(commands.registerCommand('git.api.getRemoteSources', (opts?: PickRemoteSourceOptions) => {
-		if (!extension.model) {
-			return;
-		}
-
-		return pickRemoteSource(extension.model, opts);
+		return commands.executeCommand('git-base.api.getRemoteSources', opts);
 	}));
 
 	return Disposable.from(...disposables);

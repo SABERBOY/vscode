@@ -3,45 +3,46 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
+import minimist = require('minimist');
 import { Application, Quality } from '../../../../automation';
+import { afterSuite, startApp } from '../../utils';
 
-export function setup() {
+export function setup(args: minimist.ParsedArgs) {
+
 	describe('Localization', () => {
-		before(async function () {
-			const app = this.app as Application;
 
-			if (app.quality === Quality.Dev) {
-				return;
-			}
+		let app: Application | undefined = undefined;
 
-			await app.workbench.extensions.openExtensionsViewlet();
-			await app.workbench.extensions.installExtension('ms-ceintl.vscode-language-pack-de');
-
-			await app.restart({ extraArgs: ['--locale=DE'] });
-		});
+		afterSuite(args, () => app);
 
 		it(`starts with 'DE' locale and verifies title and viewlets text is in German`, async function () {
-			const app = this.app as Application;
-
-			if (app.quality === Quality.Dev) {
-				this.skip();
-				return;
+			if (this.defaultOptions.quality === Quality.Dev || this.defaultOptions.remote) {
+				return this.skip();
 			}
 
-			await app.workbench.explorer.waitForOpenEditorsViewTitle(title => /geöffnete editoren/i.test(title));
+			app = await startApp(args, this.defaultOptions);
 
-			await app.workbench.search.openSearchViewlet();
-			await app.workbench.search.waitForTitle(title => /suchen/i.test(title));
+			await app.workbench.extensions.openExtensionsViewlet();
+			await app.workbench.extensions.installExtension('ms-ceintl.vscode-language-pack-de', false);
+			await app.restart({ extraArgs: ['--locale=DE'] });
 
-			// await app.workbench.scm.openSCMViewlet();
-			// await app.workbench.scm.waitForTitle(title => /quellcodeverwaltung/i.test(title));
+			const result = await app.workbench.localization.getLocalizedStrings();
+			const localeInfo = await app.workbench.localization.getLocaleInfo();
 
-			// See https://github.com/microsoft/vscode/issues/93462
-			// await app.workbench.debug.openDebugViewlet();
-			// await app.workbench.debug.waitForTitle(title => /starten/i.test(title));
+			await app.stop();
+			app = undefined;
 
-			// await app.workbench.extensions.openExtensionsViewlet();
-			// await app.workbench.extensions.waitForTitle(title => /extensions/i.test(title));
+			if (localeInfo.locale === undefined || localeInfo.locale.toLowerCase() !== 'de') {
+				throw new Error(`The requested locale for VS Code was not German. The received value is: ${localeInfo.locale === undefined ? 'not set' : localeInfo.locale}`);
+			}
+
+			if (localeInfo.language.toLowerCase() !== 'de') {
+				throw new Error(`The UI language is not German. It is ${localeInfo.language}`);
+			}
+
+			if (result.open.toLowerCase() !== 'öffnen' || result.close.toLowerCase() !== 'schließen' || result.find.toLowerCase() !== 'finden') {
+				throw new Error(`Received wrong German localized strings: ${JSON.stringify(result, undefined, 0)}`);
+			}
 		});
 	});
 }

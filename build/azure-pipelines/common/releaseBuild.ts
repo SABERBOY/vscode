@@ -5,7 +5,9 @@
 
 'use strict';
 
+import { ClientSecretCredential } from '@azure/identity';
 import { CosmosClient } from '@azure/cosmos';
+import { retry } from './retry';
 
 function getEnv(name: string): string {
 	const result = process.env[name];
@@ -45,7 +47,8 @@ async function main(): Promise<void> {
 	const commit = getEnv('BUILD_SOURCEVERSION');
 	const quality = getEnv('VSCODE_QUALITY');
 
-	const client = new CosmosClient({ endpoint: process.env['AZURE_DOCUMENTDB_ENDPOINT']!, key: process.env['AZURE_DOCUMENTDB_MASTERKEY'] });
+	const aadCredentials = new ClientSecretCredential(process.env['AZURE_TENANT_ID']!, process.env['AZURE_CLIENT_ID']!, process.env['AZURE_CLIENT_SECRET']!);
+	const client = new CosmosClient({ endpoint: process.env['AZURE_DOCUMENTDB_ENDPOINT']!, aadCredentials });
 	const config = await getConfig(client, quality);
 
 	console.log('Quality config:', config);
@@ -58,7 +61,7 @@ async function main(): Promise<void> {
 	console.log(`Releasing build ${commit}...`);
 
 	const scripts = client.database('builds').container(quality).scripts;
-	await scripts.storedProcedure('releaseBuild').execute('', [commit]);
+	await retry(() => scripts.storedProcedure('releaseBuild').execute('', [commit]));
 }
 
 main().then(() => {

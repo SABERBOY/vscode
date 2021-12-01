@@ -4,8 +4,10 @@
  *--------------------------------------------------------------------------------------------*/
 
 import * as fs from 'fs';
+import minimist = require('minimist');
 import * as path from 'path';
 import { Application } from '../../../../automation';
+import { afterSuite, beforeSuite } from '../../utils';
 
 function toUri(path: string): string {
 	if (process.platform === 'win32') {
@@ -15,14 +17,18 @@ function toUri(path: string): string {
 	return `${path}`;
 }
 
-async function createWorkspaceFile(workspacePath: string): Promise<string> {
+function createWorkspaceFile(workspacePath: string): string {
 	const workspaceFilePath = path.join(path.dirname(workspacePath), 'smoketest.code-workspace');
 	const workspace = {
 		folders: [
 			{ path: toUri(path.join(workspacePath, 'public')) },
 			{ path: toUri(path.join(workspacePath, 'routes')) },
 			{ path: toUri(path.join(workspacePath, 'views')) }
-		]
+		],
+		settings: {
+			'workbench.startupEditor': 'none',
+			'workbench.enableExperiments': false
+		}
 	};
 
 	fs.writeFileSync(workspaceFilePath, JSON.stringify(workspace, null, '\t'));
@@ -30,18 +36,14 @@ async function createWorkspaceFile(workspacePath: string): Promise<string> {
 	return workspaceFilePath;
 }
 
-export function setup() {
+export function setup(opts: minimist.ParsedArgs) {
 	describe('Multiroot', () => {
-
-		before(async function () {
-			const app = this.app as Application;
-
-			const workspaceFilePath = await createWorkspaceFile(app.workspacePathOrFolder);
-
-			// restart with preventing additional windows from restoring
-			// to ensure the window after restart is the multi-root workspace
-			await app.restart({ workspaceOrFolder: workspaceFilePath });
+		beforeSuite(opts, async opts => {
+			const workspacePath = createWorkspaceFile(opts.workspacePath);
+			return { ...opts, workspacePath };
 		});
+
+		afterSuite(opts);
 
 		it('shows results from all folders', async function () {
 			const app = this.app as Application;

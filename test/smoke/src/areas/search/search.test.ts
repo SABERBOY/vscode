@@ -4,14 +4,29 @@
  *--------------------------------------------------------------------------------------------*/
 
 import * as cp from 'child_process';
+import minimist = require('minimist');
 import { Application } from '../../../../automation';
+import { afterSuite, beforeSuite, retry } from '../../utils';
 
-export function setup() {
+export function setup(opts: minimist.ParsedArgs) {
 	describe('Search', () => {
+		beforeSuite(opts);
+
 		after(function () {
 			const app = this.app as Application;
-			cp.execSync('git checkout . --quiet', { cwd: app.workspacePathOrFolder });
-			cp.execSync('git reset --hard origin/master --quiet', { cwd: app.workspacePathOrFolder });
+			retry(async () => cp.execSync('git checkout . --quiet', { cwd: app.workspacePathOrFolder }), 0, 5);
+			retry(async () => cp.execSync('git reset --hard HEAD --quiet', { cwd: app.workspacePathOrFolder }), 0, 5);
+		});
+
+		afterSuite(opts);
+
+		// https://github.com/microsoft/vscode/issues/124146
+		it.skip /* https://github.com/microsoft/vscode/issues/124335 */('has a tooltp with a keybinding', async function () {
+			const app = this.app as Application;
+			const tooltip: string = await app.workbench.search.getSearchTooltip();
+			if (!/Search \(.+\)/.test(tooltip)) {
+				throw Error(`Expected search tooltip to contain keybinding but got ${tooltip}`);
+			}
 		});
 
 		it('searches for body & checks for correct result number', async function () {
@@ -34,14 +49,14 @@ export function setup() {
 			await app.workbench.search.hideQueryDetails();
 		});
 
-		it('dismisses result & checks for correct result number', async function () {
+		it.skip('dismisses result & checks for correct result number', async function () {
 			const app = this.app as Application;
 			await app.workbench.search.searchFor('body');
 			await app.workbench.search.removeFileMatch('app.js');
 			await app.workbench.search.waitForResultText('12 results in 4 files');
 		});
 
-		it('replaces first search result with a replace term', async function () {
+		it.skip('replaces first search result with a replace term', async function () {
 			const app = this.app as Application;
 
 			await app.workbench.search.searchFor('body');
@@ -53,11 +68,14 @@ export function setup() {
 			await app.workbench.search.searchFor('ydob');
 			await app.workbench.search.setReplaceText('body');
 			await app.workbench.search.replaceFileMatch('app.js');
-			await app.workbench.search.waitForNoResultText();
+			await app.workbench.search.waitForResultText('0 results in 0 files');
 		});
 	});
 
 	describe('Quick Access', () => {
+		beforeSuite(opts);
+		afterSuite(opts);
+
 		it('quick access search produces correct result', async function () {
 			const app = this.app as Application;
 			const expectedNames = [
@@ -70,7 +88,7 @@ export function setup() {
 				'jsconfig.json'
 			];
 
-			await app.workbench.quickaccess.openQuickAccess('.js');
+			await app.workbench.quickaccess.openQuickAccessAndWait('.js');
 			await app.workbench.quickinput.waitForQuickInputElements(names => expectedNames.every(n => names.some(m => n === m)));
 			await app.code.dispatchKeybinding('escape');
 		});
@@ -83,7 +101,7 @@ export function setup() {
 				'package.json'
 			];
 
-			await app.workbench.quickaccess.openQuickAccess('a.s');
+			await app.workbench.quickaccess.openQuickAccessAndWait('a.s');
 			await app.workbench.quickinput.waitForQuickInputElements(names => expectedNames.every(n => names.some(m => n === m)));
 			await app.code.dispatchKeybinding('escape');
 		});

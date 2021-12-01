@@ -3,23 +3,23 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { ViewContainerLocation, IViewDescriptorService, ViewContainer, IViewsRegistry, IViewContainersRegistry, IViewDescriptor, Extensions as ViewExtensions, ViewVisibilityState, defaultViewIcon } from 'vs/workbench/common/views';
+import { ViewContainerLocation, IViewDescriptorService, ViewContainer, IViewsRegistry, IViewContainersRegistry, IViewDescriptor, Extensions as ViewExtensions, ViewVisibilityState, defaultViewIcon, ViewContainerLocationToString } from 'vs/workbench/common/views';
 import { IContextKey, RawContextKey, IContextKeyService, ContextKeyExpr } from 'vs/platform/contextkey/common/contextkey';
 import { IStorageService, StorageScope, IStorageValueChangeEvent, StorageTarget } from 'vs/platform/storage/common/storage';
 import { IExtensionService } from 'vs/workbench/services/extensions/common/extensions';
 import { Registry } from 'vs/platform/registry/common/platform';
 import { toDisposable, DisposableStore, Disposable, IDisposable } from 'vs/base/common/lifecycle';
-import { ViewPaneContainer } from 'vs/workbench/browser/parts/views/viewPaneContainer';
+import { ViewPaneContainer, ViewPaneContainerAction, ViewsSubMenu } from 'vs/workbench/browser/parts/views/viewPaneContainer';
 import { SyncDescriptor } from 'vs/platform/instantiation/common/descriptors';
 import { registerSingleton } from 'vs/platform/instantiation/common/extensions';
 import { Event, Emitter } from 'vs/base/common/event';
 import { ITelemetryService } from 'vs/platform/telemetry/common/telemetry';
 import { generateUuid } from 'vs/base/common/uuid';
-import { IInstantiationService } from 'vs/platform/instantiation/common/instantiation';
+import { IInstantiationService, ServicesAccessor } from 'vs/platform/instantiation/common/instantiation';
 import { getViewsStateStorageId, ViewContainerModel } from 'vs/workbench/services/views/common/viewContainerModel';
 import { registerAction2, Action2, MenuId } from 'vs/platform/actions/common/actions';
 import { localize } from 'vs/nls';
-import { ThemeIcon } from 'vs/platform/theme/common/themeService';
+import { IConfigurationService } from 'vs/platform/configuration/common/configuration';
 
 interface ICachedViewContainerInfo {
 	containerId: string;
@@ -45,6 +45,7 @@ export class ViewDescriptorService extends Disposable implements IViewDescriptor
 	readonly onDidChangeContainerLocation: Event<{ viewContainer: ViewContainer, from: ViewContainerLocation, to: ViewContainerLocation }> = this._onDidChangeContainerLocation.event;
 
 	private readonly viewContainerModels: Map<ViewContainer, { viewContainerModel: ViewContainerModel, disposable: IDisposable; }>;
+	private readonly viewsVisibilityActionDisposables: Map<ViewContainer, DisposableStore>;
 	private readonly activeViewContextKeys: Map<string, IContextKey<boolean>>;
 	private readonly movableViewContextKeys: Map<string, IContextKey<boolean>>;
 	private readonly defaultViewLocationContextKeys: Map<string, IContextKey<boolean>>;
@@ -94,6 +95,7 @@ export class ViewDescriptorService extends Disposable implements IViewDescriptor
 
 	constructor(
 		@IInstantiationService private readonly instantiationService: IInstantiationService,
+		@IConfigurationService private readonly configurationService: IConfigurationService,
 		@IContextKeyService private readonly contextKeyService: IContextKeyService,
 		@IStorageService private readonly storageService: IStorageService,
 		@IExtensionService private readonly extensionService: IExtensionService,
@@ -102,6 +104,7 @@ export class ViewDescriptorService extends Disposable implements IViewDescriptor
 		super();
 
 		this.viewContainerModels = new Map<ViewContainer, { viewContainerModel: ViewContainerModel, disposable: IDisposable; }>();
+		this.viewsVisibilityActionDisposables = new Map<ViewContainer, DisposableStore>();
 		this.activeViewContextKeys = new Map<string, IContextKey<boolean>>();
 		this.movableViewContextKeys = new Map<string, IContextKey<boolean>>();
 		this.defaultViewLocationContextKeys = new Map<string, IContextKey<boolean>>();
@@ -115,6 +118,11 @@ export class ViewDescriptorService extends Disposable implements IViewDescriptor
 
 		// Register all containers that were registered before this ctor
 		this.viewContainers.forEach(viewContainer => this.onDidRegisterViewContainer(viewContainer));
+
+		// TODO@sbatten remove with setting for side panel/auxiliary bar
+		if (!this.configurationService.getValue<boolean>('workbench.experimental.sidePanel.enabled')) {
+			this.fallbackDisabledAuxiliaryBar();
+		}
 
 		this._register(this.viewsRegistry.onViewsRegistered(views => this.onDidRegisterViews(views)));
 		this._register(this.viewsRegistry.onViewsDeregistered(({ views, viewContainer }) => this.onDidDeregisterViews(views, viewContainer)));
@@ -134,6 +142,8 @@ export class ViewDescriptorService extends Disposable implements IViewDescriptor
 		this._register(toDisposable(() => {
 			this.viewContainerModels.forEach(({ disposable }) => disposable.dispose());
 			this.viewContainerModels.clear();
+			this.viewsVisibilityActionDisposables.forEach(disposables => disposables.dispose());
+			this.viewsVisibilityActionDisposables.clear();
 		}));
 
 		this._register(this.storageService.onDidChangeValue((e) => { this.onDidStorageChange(e); }));
@@ -178,6 +188,35 @@ export class ViewDescriptorService extends Disposable implements IViewDescriptor
 			}
 
 			this.removeViews(viewContainer, groupedViews.get(viewContainerId)!.views);
+		}
+	}
+
+	private fallbackDisabledAuxiliaryBar(): void {
+		for (const [containerId, containerLocation] of this.cachedViewContainerInfo.entries()) {
+			if (containerLocation === ViewContainerLocation.AuxiliaryBar) {
+				const container = this.getViewContainerById(containerId);
+				if (!container || this.isGeneratedContainerId(containerId)) {
+					continue;
+				}
+
+				this.moveViewContainerToLocation(container, this.getDefaultViewContainerLocation(container));
+			}
+		}
+
+
+		for (const [viewId, containerInfo] of this.cachedViewInfo.entries()) {
+			const containerId = containerInfo.containerId;
+
+			if (!this.isGeneratedContainerId(containerId) || this.cachedViewContainerInfo.get(containerId) !== ViewContainerLocation.AuxiliaryBar) {
+				continue;
+			}
+
+			// check if view has been registered to default location
+			const viewContainer = this.viewsRegistry.getViewContainer(viewId);
+			const viewDescriptor = this.getViewDescriptorById(viewId);
+			if (viewContainer && viewDescriptor) {
+				this.addViews(viewContainer, [viewDescriptor]);
+			}
 		}
 	}
 
@@ -460,11 +499,11 @@ export class ViewDescriptorService extends Disposable implements IViewDescriptor
 		const container = this.viewContainersRegistry.registerViewContainer({
 			id,
 			ctorDescriptor: new SyncDescriptor(ViewPaneContainer, [id, { mergeViewWithContainerWhenSingleView: true, donotShowContainerTitleWhenMergedWithContainer: true }]),
-			name: 'Custom Views', // we don't want to see this, so no need to localize
-			icon: location === ViewContainerLocation.Sidebar ? ThemeIcon.fromCodicon(defaultViewIcon) : undefined,
+			title: id, // we don't want to see this so using id
+			icon: location === ViewContainerLocation.Sidebar ? defaultViewIcon : undefined,
 			storageId: getViewContainerStorageId(id),
 			hideIfEmpty: true
-		}, location);
+		}, location, { donotRegisterOpenCommand: true });
 
 		const cachedInfo = this.cachedViewContainerInfo.get(container.id);
 		if (cachedInfo !== location) {
@@ -589,7 +628,7 @@ export class ViewDescriptorService extends Disposable implements IViewDescriptor
 	// Old Format (deprecated)
 	// {Common Prefix}.{Uniqueness Id}.{Source View Id}
 	private generateContainerId(location: ViewContainerLocation): string {
-		return `${ViewDescriptorService.COMMON_CONTAINER_ID_PREFIX}.${location === ViewContainerLocation.Panel ? 'panel' : 'sidebar'}.${generateUuid()}`;
+		return `${ViewDescriptorService.COMMON_CONTAINER_ID_PREFIX}.${ViewContainerLocationToString(location)}.${generateUuid()}`;
 	}
 
 	private getStoredCachedViewPositionsValue(): string {
@@ -682,6 +721,22 @@ export class ViewDescriptorService extends Disposable implements IViewDescriptor
 			this.onDidChangeActiveViews({ added: viewContainerModel.activeViewDescriptors, removed: [] });
 			viewContainerModel.onDidChangeActiveViewDescriptors(changed => this.onDidChangeActiveViews(changed), this, disposables);
 
+			this.onDidChangeVisibleViews({ added: [...viewContainerModel.visibleViewDescriptors], removed: [] });
+			viewContainerModel.onDidAddVisibleViewDescriptors(added => this.onDidChangeVisibleViews({ added: added.map(({ viewDescriptor }) => viewDescriptor), removed: [] }), this, disposables);
+			viewContainerModel.onDidRemoveVisibleViewDescriptors(removed => this.onDidChangeVisibleViews({ added: [], removed: removed.map(({ viewDescriptor }) => viewDescriptor) }), this, disposables);
+
+			this.registerViewsVisibilityActions(viewContainerModel);
+			disposables.add(Event.any(
+				viewContainerModel.onDidChangeActiveViewDescriptors,
+				viewContainerModel.onDidAddVisibleViewDescriptors,
+				viewContainerModel.onDidRemoveVisibleViewDescriptors,
+				viewContainerModel.onDidMoveVisibleViewDescriptors
+			)(e => this.registerViewsVisibilityActions(viewContainerModel!)));
+			disposables.add(toDisposable(() => {
+				this.viewsVisibilityActionDisposables.get(viewContainer)?.dispose();
+				this.viewsVisibilityActionDisposables.delete(viewContainer);
+			}));
+
 			disposables.add(this.registerResetViewContainerAction(viewContainer));
 
 			this.viewContainerModels.set(viewContainer, { viewContainerModel: viewContainerModel, disposable: disposables });
@@ -719,6 +774,85 @@ export class ViewDescriptorService extends Disposable implements IViewDescriptor
 		});
 	}
 
+	private onDidChangeVisibleViews({ added, removed }: { added: IViewDescriptor[], removed: IViewDescriptor[]; }): void {
+		this.contextKeyService.bufferChangeEvents(() => {
+			added.forEach(viewDescriptor => this.getOrCreateVisibleViewContextKey(viewDescriptor).set(true));
+			removed.forEach(viewDescriptor => this.getOrCreateVisibleViewContextKey(viewDescriptor).set(false));
+		});
+	}
+
+	private registerViewsVisibilityActions(viewContainerModel: ViewContainerModel): void {
+		let disposables = this.viewsVisibilityActionDisposables.get(viewContainerModel.viewContainer);
+		if (!disposables) {
+			disposables = new DisposableStore();
+			this.viewsVisibilityActionDisposables.set(viewContainerModel.viewContainer, disposables);
+		}
+		disposables.clear();
+		viewContainerModel.activeViewDescriptors.forEach((viewDescriptor, index) => {
+			if (!viewDescriptor.remoteAuthority) {
+				disposables?.add(registerAction2(class extends ViewPaneContainerAction<ViewPaneContainer> {
+					constructor() {
+						super({
+							id: `${viewDescriptor.id}.toggleVisibility`,
+							viewPaneContainerId: viewContainerModel.viewContainer.id,
+							precondition: viewDescriptor.canToggleVisibility && (!viewContainerModel.isVisible(viewDescriptor.id) || viewContainerModel.visibleViewDescriptors.length > 1) ? ContextKeyExpr.true() : ContextKeyExpr.false(),
+							toggled: ContextKeyExpr.has(`${viewDescriptor.id}.visible`),
+							title: viewDescriptor.name,
+							menu: [{
+								id: ViewsSubMenu,
+								group: '1_toggleViews',
+								when: ContextKeyExpr.and(
+									ContextKeyExpr.equals('viewContainer', viewContainerModel.viewContainer.id),
+									ContextKeyExpr.equals('viewContainerLocation', ViewContainerLocationToString(ViewContainerLocation.Sidebar)),
+								),
+								order: index,
+							}, {
+								id: MenuId.ViewContainerTitleContext,
+								when: ContextKeyExpr.and(
+									ContextKeyExpr.equals('viewContainer', viewContainerModel.viewContainer.id),
+								),
+								order: index,
+								group: '1_toggleVisibility'
+							}, {
+								id: MenuId.ViewTitleContext,
+								when: ContextKeyExpr.and(
+									viewContainerModel.visibleViewDescriptors.length > 1 ? ContextKeyExpr.or(...viewContainerModel.visibleViewDescriptors.map(v => ContextKeyExpr.equals('view', v.id))) : ContextKeyExpr.false()
+								),
+								order: index,
+								group: '2_toggleVisibility'
+							}]
+						});
+					}
+					async runInViewPaneContainer(serviceAccessor: ServicesAccessor, viewPaneContainer: ViewPaneContainer): Promise<void> {
+						viewPaneContainer.toggleViewVisibility(viewDescriptor.id);
+					}
+				}));
+				disposables?.add(registerAction2(class extends ViewPaneContainerAction<ViewPaneContainer> {
+					constructor() {
+						super({
+							id: `${viewDescriptor.id}.removeView`,
+							viewPaneContainerId: viewContainerModel.viewContainer.id,
+							title: localize('hideView', "Hide '{0}'", viewDescriptor.name),
+							precondition: viewDescriptor.canToggleVisibility && (!viewContainerModel.isVisible(viewDescriptor.id) || viewContainerModel.visibleViewDescriptors.length > 1) ? ContextKeyExpr.true() : ContextKeyExpr.false(),
+							menu: [{
+								id: MenuId.ViewTitleContext,
+								when: ContextKeyExpr.and(
+									ContextKeyExpr.equals('view', viewDescriptor.id),
+									ContextKeyExpr.has(`${viewDescriptor.id}.visible`),
+								),
+								group: '1_hide',
+								order: 1
+							}]
+						});
+					}
+					async runInViewPaneContainer(serviceAccessor: ServicesAccessor, viewPaneContainer: ViewPaneContainer): Promise<void> {
+						viewPaneContainer.toggleViewVisibility(viewDescriptor.id);
+					}
+				}));
+			}
+		});
+	}
+
 	private registerResetViewContainerAction(viewContainer: ViewContainer): IDisposable {
 		const that = this;
 		return registerAction2(class ResetViewLocationAction extends Action2 {
@@ -733,7 +867,7 @@ export class ViewDescriptorService extends Disposable implements IViewDescriptor
 						id: MenuId.ViewContainerTitleContext,
 						when: ContextKeyExpr.or(
 							ContextKeyExpr.and(
-								ContextKeyExpr.equals('container', viewContainer.id),
+								ContextKeyExpr.equals('viewContainer', viewContainer.id),
 								ContextKeyExpr.equals(`${viewContainer.id}.defaultViewContainerLocation`, false)
 							)
 						)
@@ -776,6 +910,16 @@ export class ViewDescriptorService extends Disposable implements IViewDescriptor
 
 	private getOrCreateActiveViewContextKey(viewDescriptor: IViewDescriptor): IContextKey<boolean> {
 		const activeContextKeyId = `${viewDescriptor.id}.active`;
+		let contextKey = this.activeViewContextKeys.get(activeContextKeyId);
+		if (!contextKey) {
+			contextKey = new RawContextKey(activeContextKeyId, false).bindTo(this.contextKeyService);
+			this.activeViewContextKeys.set(activeContextKeyId, contextKey);
+		}
+		return contextKey;
+	}
+
+	private getOrCreateVisibleViewContextKey(viewDescriptor: IViewDescriptor): IContextKey<boolean> {
+		const activeContextKeyId = `${viewDescriptor.id}.visible`;
 		let contextKey = this.activeViewContextKeys.get(activeContextKeyId);
 		if (!contextKey) {
 			contextKey = new RawContextKey(activeContextKeyId, false).bindTo(this.contextKeyService);

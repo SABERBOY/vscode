@@ -3,14 +3,11 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import * as strings from 'vs/base/common/strings';
 import * as streams from 'vs/base/common/stream';
 
 declare const Buffer: any;
 
 const hasBuffer = (typeof Buffer !== 'undefined');
-const hasTextEncoder = (typeof TextEncoder !== 'undefined');
-const hasTextDecoder = (typeof TextDecoder !== 'undefined');
 
 let textEncoder: TextEncoder | null;
 let textDecoder: TextDecoder | null;
@@ -34,17 +31,24 @@ export class VSBuffer {
 		return new VSBuffer(actual);
 	}
 
-	static fromString(source: string): VSBuffer {
-		if (hasBuffer) {
+	static fromString(source: string, options?: { dontUseNodeBuffer?: boolean; }): VSBuffer {
+		const dontUseNodeBuffer = options?.dontUseNodeBuffer || false;
+		if (!dontUseNodeBuffer && hasBuffer) {
 			return new VSBuffer(Buffer.from(source));
-		} else if (hasTextEncoder) {
+		} else {
 			if (!textEncoder) {
 				textEncoder = new TextEncoder();
 			}
 			return new VSBuffer(textEncoder.encode(source));
-		} else {
-			return new VSBuffer(strings.encodeUTF8(source));
 		}
+	}
+
+	static fromByteArray(source: number[]): VSBuffer {
+		const result = VSBuffer.alloc(source.length);
+		for (let i = 0, len = source.length; i < len; i++) {
+			result.buffer[i] = source[i];
+		}
+		return result;
 	}
 
 	static concat(buffers: VSBuffer[], totalLength?: number): VSBuffer {
@@ -74,33 +78,46 @@ export class VSBuffer {
 		this.byteLength = this.buffer.byteLength;
 	}
 
+	clone(): VSBuffer {
+		const result = VSBuffer.alloc(this.byteLength);
+		result.set(this);
+		return result;
+	}
+
 	toString(): string {
 		if (hasBuffer) {
 			return this.buffer.toString();
-		} else if (hasTextDecoder) {
+		} else {
 			if (!textDecoder) {
 				textDecoder = new TextDecoder();
 			}
 			return textDecoder.decode(this.buffer);
-		} else {
-			return strings.decodeUTF8(this.buffer);
 		}
 	}
 
 	slice(start?: number, end?: number): VSBuffer {
 		// IMPORTANT: use subarray instead of slice because TypedArray#slice
 		// creates shallow copy and NodeBuffer#slice doesn't. The use of subarray
-		// ensures the same, performant, behaviour.
-		return new VSBuffer(this.buffer.subarray(start!/*bad lib.d.ts*/, end));
+		// ensures the same, performance, behaviour.
+		return new VSBuffer(this.buffer.subarray(start, end));
 	}
 
 	set(array: VSBuffer, offset?: number): void;
 	set(array: Uint8Array, offset?: number): void;
-	set(array: VSBuffer | Uint8Array, offset?: number): void {
+	set(array: ArrayBuffer, offset?: number): void;
+	set(array: ArrayBufferView, offset?: number): void;
+	set(array: VSBuffer | Uint8Array | ArrayBuffer | ArrayBufferView, offset?: number): void;
+	set(array: VSBuffer | Uint8Array | ArrayBuffer | ArrayBufferView, offset?: number): void {
 		if (array instanceof VSBuffer) {
 			this.buffer.set(array.buffer, offset);
-		} else {
+		} else if (array instanceof Uint8Array) {
 			this.buffer.set(array, offset);
+		} else if (array instanceof ArrayBuffer) {
+			this.buffer.set(new Uint8Array(array), offset);
+		} else if (ArrayBuffer.isView(array)) {
+			this.buffer.set(new Uint8Array(array.buffer, array.byteOffset, array.byteLength), offset);
+		} else {
+			throw new Error(`Unkown argument 'array'`);
 		}
 	}
 
@@ -233,4 +250,12 @@ export function streamToBufferReadableStream(stream: streams.ReadableStreamEvent
 
 export function newWriteableBufferStream(options?: streams.WriteableStreamOptions): streams.WriteableStream<VSBuffer> {
 	return streams.newWriteableStream<VSBuffer>(chunks => VSBuffer.concat(chunks), options);
+}
+
+export function prefixedBufferReadable(prefix: VSBuffer, readable: VSBufferReadable): VSBufferReadable {
+	return streams.prefixedReadable(prefix, readable, chunks => VSBuffer.concat(chunks));
+}
+
+export function prefixedBufferStream(prefix: VSBuffer, stream: VSBufferReadableStream): VSBufferReadableStream {
+	return streams.prefixedStream(prefix, stream, chunks => VSBuffer.concat(chunks));
 }
