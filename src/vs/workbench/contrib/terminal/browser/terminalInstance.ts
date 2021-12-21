@@ -42,7 +42,7 @@ import { IProcessDataEvent, IShellLaunchConfig, ITerminalDimensionsOverride, ITe
 import { IProductService } from 'vs/platform/product/common/productService';
 import { formatMessageForTerminal } from 'vs/workbench/contrib/terminal/common/terminalStrings';
 import { AutoOpenBarrier, Promises } from 'vs/base/common/async';
-import { Codicon, iconRegistry } from 'vs/base/common/codicons';
+import { Codicon } from 'vs/base/common/codicons';
 import { ITerminalStatusList, TerminalStatus, TerminalStatusList } from 'vs/workbench/contrib/terminal/browser/terminalStatusList';
 import { IQuickInputService, IQuickPickItem, IQuickPickSeparator } from 'vs/platform/quickinput/common/quickInput';
 import { IWorkbenchEnvironmentService } from 'vs/workbench/services/environment/common/environmentService';
@@ -65,6 +65,7 @@ import { ScrollbarVisibility } from 'vs/base/common/scrollable';
 import { LineDataEventAddon } from 'vs/workbench/contrib/terminal/browser/xterm/lineDataEventAddon';
 import { XtermTerminal } from 'vs/workbench/contrib/terminal/browser/xterm/xtermTerminal';
 import { escapeNonWindowsPath } from 'vs/platform/terminal/common/terminalEnvironment';
+import { IWorkspaceTrustRequestService } from 'vs/platform/workspace/common/workspaceTrust';
 
 const enum Constants {
 	/**
@@ -179,12 +180,14 @@ export class TerminalInstance extends Disposable implements ITerminalInstance {
 	private _labelComputer?: TerminalLabelComputer;
 	private _userHome?: string;
 	private _hasScrollBar?: boolean;
+	private _target?: TerminalLocation | undefined;
 
-	get target(): TerminalLocation | undefined { return this.xterm?.target; }
+	get target(): TerminalLocation | undefined { return this._target; }
 	set target(value: TerminalLocation | undefined) {
 		if (this.xterm) {
 			this.xterm.target = value;
 		}
+		this._target = value;
 	}
 
 	get instanceId(): number { return this._instanceId; }
@@ -314,7 +317,8 @@ export class TerminalInstance extends Disposable implements ITerminalInstance {
 		@IQuickInputService private readonly _quickInputService: IQuickInputService,
 		@IWorkbenchEnvironmentService workbenchEnvironmentService: IWorkbenchEnvironmentService,
 		@IWorkspaceContextService private readonly _workspaceContextService: IWorkspaceContextService,
-		@IEditorService private readonly _editorService: IEditorService
+		@IEditorService private readonly _editorService: IEditorService,
+		@IWorkspaceTrustRequestService private readonly _workspaceTrustRequestService: IWorkspaceTrustRequestService
 	) {
 		super();
 
@@ -328,7 +332,6 @@ export class TerminalInstance extends Disposable implements ITerminalInstance {
 		this._titleReadyPromise = new Promise<string>(c => {
 			this._titleReadyComplete = c;
 		});
-
 		this._fixedRows = _shellLaunchConfig.attachPersistentProcess?.fixedDimensions?.rows;
 		this._fixedCols = _shellLaunchConfig.attachPersistentProcess?.fixedDimensions?.cols;
 		this._icon = _shellLaunchConfig.attachPersistentProcess?.icon || _shellLaunchConfig.icon;
@@ -548,7 +551,7 @@ export class TerminalInstance extends Disposable implements ITerminalInstance {
 	}
 
 	get persistentProcessId(): number | undefined { return this._processManager.persistentProcessId; }
-	get shouldPersist(): boolean { return this._processManager.shouldPersist; }
+	get shouldPersist(): boolean { return this._processManager.shouldPersist && !this.shellLaunchConfig.disablePersistence; }
 
 	/**
 	 * Create xterm.js instance and attach data listeners.
@@ -559,7 +562,7 @@ export class TerminalInstance extends Disposable implements ITerminalInstance {
 			throw new Error('Terminal disposed of during xterm.js creation');
 		}
 
-		const xterm = this._instantiationService.createInstance(XtermTerminal, Terminal, this._configHelper, this._cols, this._rows);
+		const xterm = this._instantiationService.createInstance(XtermTerminal, Terminal, this._configHelper, this._cols, this._rows, this.target || TerminalLocation.Panel);
 		this.xterm = xterm;
 		const lineDataEventAddon = new LineDataEventAddon();
 		this.xterm.raw.loadAddon(lineDataEventAddon);
@@ -655,7 +658,6 @@ export class TerminalInstance extends Disposable implements ITerminalInstance {
 		this._container = undefined;
 	}
 
-
 	attachToElement(container: HTMLElement): Promise<void> | void {
 		// The container did not change, do nothing
 		if (this._container === container) {
@@ -664,12 +666,11 @@ export class TerminalInstance extends Disposable implements ITerminalInstance {
 
 		this._attachBarrier.open();
 
-		this.xterm?.attachToElement(container);
-
 		// Attach has not occurred yet
 		if (!this._wrapperElement) {
 			return this._attachToElement(container);
 		}
+		this.xterm?.attachToElement(this._wrapperElement);
 
 		// The container changed, reattach
 		this._container = container;
@@ -700,7 +701,6 @@ export class TerminalInstance extends Disposable implements ITerminalInstance {
 		if (!xterm.raw.element || !xterm.raw.textarea) {
 			throw new Error('xterm elements not set after open');
 		}
-
 
 		this._setAriaLabel(xterm.raw, this._instanceId, this._title);
 
@@ -990,7 +990,7 @@ export class TerminalInstance extends Disposable implements ITerminalInstance {
 	}
 
 	async sendPath(originalPath: string, addNewLine: boolean): Promise<void> {
-		const preparedPath = await preparePathForShell(originalPath, this.shellLaunchConfig.executable, this.title, this.shellType, this._processManager.backend);
+		const preparedPath = await preparePathForShell(originalPath, this.shellLaunchConfig.executable, this.title, this.shellType, this._processManager.backend, this._processManager.os);
 		return this.sendText(preparedPath, addNewLine);
 	}
 
@@ -1102,6 +1102,9 @@ export class TerminalInstance extends Disposable implements ITerminalInstance {
 				case ProcessPropertyType.ResolvedShellLaunchConfig:
 					this._setResolvedShellLaunchConfig(value);
 					break;
+				case ProcessPropertyType.ShellType:
+					this.setShellType(value);
+					break;
 				case ProcessPropertyType.HasChildProcesses:
 					this._onDidChangeHasChildProcesses.fire(value);
 					break;
@@ -1135,6 +1138,11 @@ export class TerminalInstance extends Disposable implements ITerminalInstance {
 	private async _createProcess(): Promise<void> {
 		if (this._isDisposed) {
 			return;
+		}
+
+		const trusted = await this._trust();
+		if (!trusted) {
+			this._onProcessExit({ message: nls.localize('workspaceNotTrustedCreateTerminal', "Cannot launch a terminal process in an untrusted workspace") });
 		}
 
 		// Re-evaluate dimensions if the container has been set since the xterm instance was created
@@ -1309,7 +1317,11 @@ export class TerminalInstance extends Disposable implements ITerminalInstance {
 		// Set the new shell launch config
 		this._shellLaunchConfig = shell; // Must be done before calling _createProcess()
 
-		this._processManager.relaunch(this._shellLaunchConfig, this._cols || Constants.DefaultCols, this._rows || Constants.DefaultRows, this._accessibilityService.isScreenReaderOptimized(), reset);
+		await this._processManager.relaunch(this._shellLaunchConfig, this._cols || Constants.DefaultCols, this._rows || Constants.DefaultRows, this._accessibilityService.isScreenReaderOptimized(), reset).then(error => {
+			if (error) {
+				this._onProcessExit(error);
+			}
+		});
 
 		this._xtermTypeAheadAddon?.reset();
 	}
@@ -1323,6 +1335,13 @@ export class TerminalInstance extends Disposable implements ITerminalInstance {
 		if (this.isTitleSetByProcess) {
 			this.refreshTabLabels(title, TitleEventSource.Sequence);
 		}
+	}
+
+	private async _trust(): Promise<boolean> {
+		return (await this._workspaceTrustRequestService.requestWorkspaceTrust(
+			{
+				message: nls.localize('terminal.requestTrust', "Creating a terminal process requires executing code")
+			})) === true;
 	}
 
 	private _onKey(key: string, ev: KeyboardEvent): void {
@@ -1795,15 +1814,16 @@ export class TerminalInstance extends Disposable implements ITerminalInstance {
 	}
 
 	async changeIcon() {
-		const items: IQuickPickItem[] = [];
-		for (const icon of iconRegistry.all) {
-			items.push({ label: `$(${icon.id})`, description: `${icon.id}` });
+		type Item = IQuickPickItem & { icon: TerminalIcon };
+		const items: Item[] = [];
+		for (const icon of Codicon.getAll()) {
+			items.push({ label: `$(${icon.id})`, description: `${icon.id}`, icon });
 		}
 		const result = await this._quickInputService.pick(items, {
 			matchOnDescription: true
 		});
-		if (result && result.description) {
-			this._icon = iconRegistry.get(result.description);
+		if (result) {
+			this._icon = result.icon;
 			this._onIconChanged.fire(this);
 		}
 	}
@@ -2140,7 +2160,7 @@ export function parseExitResult(
 	// Create exit code message
 	let message: string | undefined = undefined;
 	switch (typeof exitCodeOrError) {
-		case 'number':
+		case 'number': {
 			let commandLine: string | undefined = undefined;
 			if (shellLaunchConfig.executable) {
 				commandLine = shellLaunchConfig.executable;
@@ -2165,7 +2185,8 @@ export function parseExitResult(
 				}
 			}
 			break;
-		case 'object':
+		}
+		case 'object': {
 			// Ignore internal errors
 			if (exitCodeOrError.message.toString().includes('Could not find pty with id')) {
 				break;
@@ -2189,6 +2210,7 @@ export function parseExitResult(
 			}
 			message = nls.localize('launchFailed.errorMessage', "The terminal process failed to launch: {0}.", innerMessage);
 			break;
+		}
 	}
 
 	return { code, message };
@@ -2205,7 +2227,7 @@ export function parseExitResult(
  * @param backend The backend for the terminal.
  * @returns An escaped version of the path to be execuded in the terminal.
  */
-async function preparePathForShell(originalPath: string, executable: string | undefined, title: string, shellType: TerminalShellType, backend: ITerminalBackend | undefined): Promise<string> {
+async function preparePathForShell(originalPath: string, executable: string | undefined, title: string, shellType: TerminalShellType, backend: ITerminalBackend | undefined, os: OperatingSystem | undefined): Promise<string> {
 	return new Promise<string>(c => {
 		if (!executable) {
 			c(originalPath);
@@ -2231,8 +2253,7 @@ async function preparePathForShell(originalPath: string, executable: string | un
 			return;
 		}
 
-		// TODO: This should use the process manager's OS, not the local OS
-		if (isWindows) {
+		if (os === OperatingSystem.Windows) {
 			// 17063 is the build number where wsl path was introduced.
 			// Update Windows uriPath to be executed in WSL.
 			if (shellType !== undefined) {

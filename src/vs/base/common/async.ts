@@ -210,6 +210,43 @@ export class SequencerByKey<TKey> {
 	}
 }
 
+interface IScheduledLater extends IDisposable {
+	isTriggered(): boolean;
+}
+
+const timeoutDeferred = (timeout: number, fn: () => void): IScheduledLater => {
+	let scheduled = true;
+	const handle = setTimeout(() => {
+		scheduled = false;
+		fn();
+	}, timeout);
+	return {
+		isTriggered: () => scheduled,
+		dispose: () => {
+			clearTimeout(handle);
+			scheduled = false;
+		},
+	};
+};
+
+const microtaskDeferred = (fn: () => void): IScheduledLater => {
+	let scheduled = true;
+	queueMicrotask(() => {
+		if (scheduled) {
+			scheduled = false;
+			fn();
+		}
+	});
+
+	return {
+		isTriggered: () => scheduled,
+		dispose: () => { scheduled = false; },
+	};
+};
+
+/** Can be passed into the Delayed to defer using a microtask */
+export const MicrotaskDelay = Symbol('MicrotaskDelay');
+
 /**
  * A helper to delay (debounce) execution of a task that is being requested often.
  *
@@ -235,21 +272,21 @@ export class SequencerByKey<TKey> {
  */
 export class Delayer<T> implements IDisposable {
 
-	private timeout: any;
+	private deferred: IScheduledLater | null;
 	private completionPromise: Promise<any> | null;
 	private doResolve: ((value?: any | Promise<any>) => void) | null;
 	private doReject: ((err: any) => void) | null;
 	private task: ITask<T | Promise<T>> | null;
 
-	constructor(public defaultDelay: number) {
-		this.timeout = null;
+	constructor(public defaultDelay: number | typeof MicrotaskDelay) {
+		this.deferred = null;
 		this.completionPromise = null;
 		this.doResolve = null;
 		this.doReject = null;
 		this.task = null;
 	}
 
-	trigger(task: ITask<T | Promise<T>>, delay: number = this.defaultDelay): Promise<T> {
+	trigger(task: ITask<T | Promise<T>>, delay = this.defaultDelay): Promise<T> {
 		this.task = task;
 		this.cancelTimeout();
 
@@ -269,18 +306,18 @@ export class Delayer<T> implements IDisposable {
 			});
 		}
 
-		this.timeout = setTimeout(() => {
-			this.timeout = null;
-			if (this.doResolve) {
-				this.doResolve(null);
-			}
-		}, delay);
+		const fn = () => {
+			this.deferred = null;
+			this.doResolve?.(null);
+		};
+
+		this.deferred = delay === MicrotaskDelay ? microtaskDeferred(fn) : timeoutDeferred(delay, fn);
 
 		return this.completionPromise;
 	}
 
 	isTriggered(): boolean {
-		return this.timeout !== null;
+		return !!this.deferred?.isTriggered();
 	}
 
 	cancel(): void {
@@ -295,10 +332,8 @@ export class Delayer<T> implements IDisposable {
 	}
 
 	private cancelTimeout(): void {
-		if (this.timeout !== null) {
-			clearTimeout(this.timeout);
-			this.timeout = null;
-		}
+		this.deferred?.dispose();
+		this.deferred = null;
 	}
 
 	dispose(): void {
@@ -515,11 +550,18 @@ interface ILimitedTaskFactory<T> {
 	e: (error?: unknown) => void;
 }
 
+export interface ILimiter<T> {
+
+	readonly size: number;
+
+	queue(factory: ITask<Promise<T>>): Promise<T>;
+}
+
 /**
  * A helper to queue N promises and run them all with a max degree of parallelism. The helper
  * ensures that at any time no more than M promises are running at the same time.
  */
-export class Limiter<T> {
+export class Limiter<T> implements ILimiter<T>{
 
 	private _size = 0;
 	private runningPromises: number;
@@ -596,7 +638,30 @@ export class ResourceQueue implements IDisposable {
 
 	private readonly queues = new Map<string, Queue<void>>();
 
-	queueFor(resource: URI, extUri: IExtUri = defaultExtUri): Queue<void> {
+	private readonly drainers = new Set<DeferredPromise<void>>();
+
+	async whenDrained(): Promise<void> {
+		if (this.isDrained()) {
+			return;
+		}
+
+		const promise = new DeferredPromise<void>();
+		this.drainers.add(promise);
+
+		return promise.p;
+	}
+
+	private isDrained(): boolean {
+		for (const [, queue] of this.queues) {
+			if (queue.size > 0) {
+				return false;
+			}
+		}
+
+		return true;
+	}
+
+	queueFor(resource: URI, extUri: IExtUri = defaultExtUri): ILimiter<void> {
 		const key = extUri.getComparisonKey(resource);
 
 		let queue = this.queues.get(key);
@@ -605,6 +670,7 @@ export class ResourceQueue implements IDisposable {
 			Event.once(queue.onFinished)(() => {
 				queue?.dispose();
 				this.queues.delete(key);
+				this.onDidQueueFinish();
 			});
 
 			this.queues.set(key, queue);
@@ -613,9 +679,36 @@ export class ResourceQueue implements IDisposable {
 		return queue;
 	}
 
+	private onDidQueueFinish(): void {
+		if (!this.isDrained()) {
+			return; // not done yet
+		}
+
+		this.releaseDrainers();
+	}
+
+	private releaseDrainers(): void {
+		for (const drainer of this.drainers) {
+			drainer.complete();
+		}
+
+		this.drainers.clear();
+	}
+
 	dispose(): void {
-		this.queues.forEach(queue => queue.dispose());
+		for (const [, queue] of this.queues) {
+			queue.dispose();
+		}
+
 		this.queues.clear();
+
+		// Even though we might still have pending
+		// tasks queued, after the queues have been
+		// disposed, we can no longer track them, so
+		// we release drainers to prevent hanging
+		// promises when the resource queue is being
+		// disposed.
+		this.releaseDrainers();
 	}
 }
 
@@ -985,7 +1078,7 @@ declare function cancelIdleCallback(handle: number): void;
 				if (disposed) {
 					return;
 				}
-				const end = Date.now() + 3; // yield often
+				const end = Date.now() + 15; // one frame at 64fps
 				runner(Object.freeze({
 					didTimeout: true,
 					timeRemaining() {
@@ -1408,7 +1501,7 @@ export class AsyncIterableObject<T> implements AsyncIterable<T> {
 	public static merge<T>(iterables: AsyncIterable<T>[]): AsyncIterableObject<T> {
 		return new AsyncIterableObject(async (emitter) => {
 			await Promise.all(iterables.map(async (iterable) => {
-				for await(const item of iterable) {
+				for await (const item of iterable) {
 					emitter.emitOne(item);
 				}
 			}));
@@ -1469,7 +1562,7 @@ export class AsyncIterableObject<T> implements AsyncIterable<T> {
 
 	public static map<T, R>(iterable: AsyncIterable<T>, mapFn: (item: T) => R): AsyncIterableObject<R> {
 		return new AsyncIterableObject<R>(async (emitter) => {
-			for await(const item of iterable) {
+			for await (const item of iterable) {
 				emitter.emitOne(mapFn(item));
 			}
 		});
@@ -1481,7 +1574,7 @@ export class AsyncIterableObject<T> implements AsyncIterable<T> {
 
 	public static filter<T>(iterable: AsyncIterable<T>, filterFn: (item: T) => boolean): AsyncIterableObject<T> {
 		return new AsyncIterableObject<T>(async (emitter) => {
-			for await(const item of iterable) {
+			for await (const item of iterable) {
 				if (filterFn(item)) {
 					emitter.emitOne(item);
 				}

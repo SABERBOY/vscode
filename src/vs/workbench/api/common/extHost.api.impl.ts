@@ -599,7 +599,7 @@ export function createApiFactoryAndRegisterActors(accessor: ServicesAccessor): I
 			},
 			showQuickPick(items: any, options?: vscode.QuickPickOptions, token?: vscode.CancellationToken): any {
 				// TODO: remove this once quickPickSeparators has been finalized.
-				if (Array.isArray(items) && items.some((item) => item.kind !== undefined)) {
+				if (Array.isArray(items) && items.some((item) => item.kind === extHostTypes.QuickPickItemKind.Separator)) {
 					checkProposedApiEnabled(extension, 'quickPickSeparators');
 				}
 				return extHostQuickOpen.showQuickPick(items, options, token);
@@ -656,9 +656,6 @@ export function createApiFactoryAndRegisterActors(accessor: ServicesAccessor): I
 			},
 			createTerminal(nameOrOptions?: vscode.TerminalOptions | vscode.ExtensionTerminalOptions | string, shellPath?: string, shellArgs?: string[] | string): vscode.Terminal {
 				if (typeof nameOrOptions === 'object') {
-					if ('location' in nameOrOptions) {
-						checkProposedApiEnabled(extension, 'terminalLocation');
-					}
 					if ('pty' in nameOrOptions) {
 						return extHostTerminalService.createExtensionTerminal(nameOrOptions);
 					}
