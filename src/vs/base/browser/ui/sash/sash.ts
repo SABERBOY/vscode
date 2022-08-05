@@ -3,7 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { $, append, createStyleSheet, EventHelper, EventLike, getElementsByTagName } from 'vs/base/browser/dom';
+import { $, append, createStyleSheet, EventHelper, EventLike } from 'vs/base/browser/dom';
 import { DomEmitter } from 'vs/base/browser/event';
 import { EventType, Gesture, GestureEvent } from 'vs/base/browser/touch';
 import { Delayer } from 'vs/base/common/async';
@@ -17,7 +17,7 @@ import 'vs/css!./sash';
  * Allow the sashes to be visible at runtime.
  * @remark Use for development purposes only.
  */
-let DEBUG = false;
+const DEBUG = false;
 // DEBUG = Boolean("true"); // done "weirdly" so that a lint warning prevents you from pushing this
 
 /**
@@ -222,6 +222,8 @@ class OrthogonalPointerEventFactory implements IPointerEventFactory {
 	}
 }
 
+const PointerEventsDisabledCssClass = 'pointer-events-disabled';
+
 /**
  * The {@link Sash} is the UI component which allows the user to resize other
  * components. It's usually an invisible horizontal or vertical line which, when
@@ -422,7 +424,7 @@ export class Sash extends Disposable {
 		const onTap = this._register(new DomEmitter(this.el, EventType.Tap)).event;
 		const onDoubleTap = Event.map(
 			Event.filter(
-				Event.debounce<GestureEvent, { event: GestureEvent, count: number }>(onTap, (res, event) => ({ event, count: (res?.count ?? 0) + 1 }), 250),
+				Event.debounce<GestureEvent, { event: GestureEvent; count: number }>(onTap, (res, event) => ({ event, count: (res?.count ?? 0) + 1 }), 250),
 				({ count }) => count === 2
 			),
 			({ event }) => ({ ...event, target: event.initialTarget ?? null })
@@ -491,9 +493,9 @@ export class Sash extends Disposable {
 			return;
 		}
 
-		const iframes = getElementsByTagName('iframe');
+		const iframes = document.getElementsByTagName('iframe');
 		for (const iframe of iframes) {
-			iframe.style.pointerEvents = 'none'; // disable mouse events on iframes as long as we drag the sash
+			iframe.classList.add(PointerEventsDisabledCssClass); // disable mouse events on iframes as long as we drag the sash
 		}
 
 		const startX = event.pageX;
@@ -558,7 +560,7 @@ export class Sash extends Disposable {
 			disposables.dispose();
 
 			for (const iframe of iframes) {
-				iframe.style.pointerEvents = 'auto';
+				iframe.classList.remove(PointerEventsDisabledCssClass);
 			}
 		};
 

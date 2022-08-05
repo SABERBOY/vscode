@@ -37,7 +37,7 @@ export class ListTopCellToolbar extends Disposable {
 		this.toolbar = this._register(new ToolBar(this.topCellToolbar, this.contextMenuService, {
 			actionViewItemProvider: action => {
 				if (action instanceof MenuItemAction) {
-					const item = this.instantiationService.createInstance(CodiconActionViewItem, action);
+					const item = this.instantiationService.createInstance(CodiconActionViewItem, action, undefined);
 					return item;
 				}
 
@@ -83,7 +83,7 @@ export class ListTopCellToolbar extends Disposable {
 		}
 	}
 
-	private getCellToolbarActions(menu: IMenu, alwaysFillSecondaryActions: boolean): { primary: IAction[], secondary: IAction[]; } {
+	private getCellToolbarActions(menu: IMenu, alwaysFillSecondaryActions: boolean): { primary: IAction[]; secondary: IAction[] } {
 		type NewType = IAction;
 
 		const primary: NewType[] = [];

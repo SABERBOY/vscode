@@ -14,8 +14,10 @@ export interface ITelemetryData {
 }
 
 export type WorkbenchActionExecutedClassification = {
-	id: { classification: 'SystemMetaData', purpose: 'FeatureInsight'; };
-	from: { classification: 'SystemMetaData', purpose: 'FeatureInsight'; };
+	owner: 'bpasero';
+	comment: 'TODO @bpasero';
+	id: { classification: 'SystemMetaData'; purpose: 'FeatureInsight'; comment: 'The identifier of the action that was run.' };
+	from: { classification: 'SystemMetaData'; purpose: 'FeatureInsight'; comment: 'The name of the component the action was run from.' };
 };
 
 export type WorkbenchActionExecutedEvent = {
@@ -258,7 +260,7 @@ export class EmptySubmenuAction extends Action {
 	}
 }
 
-export function toAction(props: { id: string, label: string, enabled?: boolean, checked?: boolean, run: Function; }): IAction {
+export function toAction(props: { id: string; label: string; enabled?: boolean; checked?: boolean; run: Function }): IAction {
 	return {
 		id: props.id,
 		label: props.label,

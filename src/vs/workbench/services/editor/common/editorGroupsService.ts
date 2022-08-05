@@ -5,11 +5,11 @@
 
 import { Event } from 'vs/base/common/event';
 import { createDecorator } from 'vs/platform/instantiation/common/instantiation';
-import { IEditorPane, GroupIdentifier, EditorInputWithOptions, CloseDirection, IEditorPartOptions, IEditorPartOptionsChangeEvent, EditorsOrder, IVisibleEditorPane, IEditorCloseEvent, IUntypedEditorInput, isEditorInput, IEditorWillMoveEvent, IEditorWillOpenEvent, IMatchEditorOptions, IActiveEditorChangeEvent } from 'vs/workbench/common/editor';
+import { IEditorPane, GroupIdentifier, EditorInputWithOptions, CloseDirection, IEditorPartOptions, IEditorPartOptionsChangeEvent, EditorsOrder, IVisibleEditorPane, IEditorCloseEvent, IUntypedEditorInput, isEditorInput, IEditorWillMoveEvent, IEditorWillOpenEvent, IMatchEditorOptions, IActiveEditorChangeEvent, IFindEditorOptions } from 'vs/workbench/common/editor';
 import { EditorInput } from 'vs/workbench/common/editor/editorInput';
 import { IEditorOptions } from 'vs/platform/editor/common/editor';
 import { IConfigurationService } from 'vs/platform/configuration/common/configuration';
-import { IDimension } from 'vs/editor/common/editorCommon';
+import { IDimension } from 'vs/editor/common/core/dimension';
 import { IDisposable } from 'vs/base/common/lifecycle';
 import { IContextKeyService } from 'vs/platform/contextkey/common/contextkey';
 import { URI } from 'vs/base/common/uri';
@@ -47,7 +47,7 @@ export const enum GroupsArrangement {
 	 * Make the current active group consume the maximum
 	 * amount of space possible.
 	 */
-	MINIMIZE_OTHERS,
+	MAXIMIZE,
 
 	/**
 	 * Size all groups evenly.
@@ -90,10 +90,10 @@ export interface ICloseEditorOptions {
 }
 
 export type ICloseEditorsFilter = {
-	except?: EditorInput,
-	direction?: CloseDirection,
-	savedOnly?: boolean,
-	excludeSticky?: boolean
+	except?: EditorInput;
+	direction?: CloseDirection;
+	savedOnly?: boolean;
+	excludeSticky?: boolean;
 };
 
 export interface ICloseAllEditorsOptions {
@@ -181,6 +181,11 @@ export interface IEditorGroupsService {
 	 * An event for when the group container is layed out.
 	 */
 	readonly onDidLayout: Event<IDimension>;
+
+	/**
+	 * An event for when the group container is scrolled.
+	 */
+	readonly onDidScroll: Event<void>;
 
 	/**
 	 * An event for when the index of a group changes.
@@ -279,12 +284,12 @@ export interface IEditorGroupsService {
 	/**
 	 * Returns the size of a group.
 	 */
-	getSize(group: IEditorGroup | GroupIdentifier): { width: number, height: number };
+	getSize(group: IEditorGroup | GroupIdentifier): { width: number; height: number };
 
 	/**
 	 * Sets the size of a group.
 	 */
-	setSize(group: IEditorGroup | GroupIdentifier, size: { width: number, height: number }): void;
+	setSize(group: IEditorGroup | GroupIdentifier, size: { width: number; height: number }): void;
 
 	/**
 	 * Arrange all groups according to the provided arrangement.
@@ -533,9 +538,10 @@ export interface IEditorGroup {
 	 * each editor that reports a `resource` that matches the
 	 * provided one.
 	 *
-	 * @param resource The resource of the editor to find
+	 * @param resource the resource of the editor to find
+	 * @param options whether to support side by side editors or not
 	 */
-	findEditors(resource: URI): readonly EditorInput[];
+	findEditors(resource: URI, options?: IFindEditorOptions): readonly EditorInput[];
 
 	/**
 	 * Returns the editor at a specific index of the group.
@@ -546,6 +552,16 @@ export interface IEditorGroup {
 	 * Returns the index of the editor in the group or -1 if not opened.
 	 */
 	getIndexOfEditor(editor: EditorInput): number;
+
+	/**
+	 * Whether the editor is the first in the group.
+	 */
+	isFirst(editor: EditorInput): boolean;
+
+	/**
+	 * Whether the editor is the last in the group.
+	 */
+	isLast(editor: EditorInput): boolean;
 
 	/**
 	 * Open an editor in this group.
@@ -568,7 +584,7 @@ export interface IEditorGroup {
 	/**
 	 * Find out if the provided editor is pinned in the group.
 	 */
-	isPinned(editor: EditorInput): boolean;
+	isPinned(editorOrIndex: EditorInput | number): boolean;
 
 	/**
 	 * Find out if the provided editor or index of editor is sticky in the group.
@@ -629,9 +645,11 @@ export interface IEditorGroup {
 	 * Closes specific editors in this group. This may trigger a confirmation dialog if
 	 * there are dirty editors and thus returns a promise as value.
 	 *
-	 * @returns a promise when all editors are closed.
+	 * @returns a promise whether the editors were closed or not. If `true`, the editors
+	 * were closed and if `false` there was a veto closing the editors, e.g. when one
+	 * is dirty.
 	 */
-	closeEditors(editors: EditorInput[] | ICloseEditorsFilter, options?: ICloseEditorOptions): Promise<void>;
+	closeEditors(editors: EditorInput[] | ICloseEditorsFilter, options?: ICloseEditorOptions): Promise<boolean>;
 
 	/**
 	 * Closes all editors from the group. This may trigger a confirmation dialog if
@@ -639,7 +657,7 @@ export interface IEditorGroup {
 	 *
 	 * @returns a promise when all editors are closed.
 	 */
-	closeAllEditors(options?: ICloseAllEditorsOptions): Promise<void>;
+	closeAllEditors(options?: ICloseAllEditorsOptions): Promise<boolean>;
 
 	/**
 	 * Replaces editors in this group with the provided replacement.
