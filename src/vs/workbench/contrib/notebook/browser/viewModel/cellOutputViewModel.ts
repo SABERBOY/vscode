@@ -3,7 +3,9 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
+import { Emitter } from 'vs/base/common/event';
 import { Disposable } from 'vs/base/common/lifecycle';
+import { observableValue } from 'vs/base/common/observable';
 import { ICellOutputViewModel, IGenericCellViewModel } from 'vs/workbench/contrib/notebook/browser/notebookBrowser';
 import { NotebookTextModel } from 'vs/workbench/contrib/notebook/common/model/notebookTextModel';
 import { ICellOutput, IOrderedMimeType, RENDERER_NOT_AVAILABLE } from 'vs/workbench/contrib/notebook/common/notebookCommon';
@@ -11,6 +13,24 @@ import { INotebookService } from 'vs/workbench/contrib/notebook/common/notebookS
 
 let handle = 0;
 export class CellOutputViewModel extends Disposable implements ICellOutputViewModel {
+	private _onDidResetRendererEmitter = this._register(new Emitter<void>());
+	readonly onDidResetRenderer = this._onDidResetRendererEmitter.event;
+
+	private alwaysShow = false;
+	visible = observableValue<boolean>('outputVisible', false);
+	setVisible(visible = true, force: boolean = false) {
+		if (!visible && this.alwaysShow) {
+			// we are forced to show, so no-op
+			return;
+		}
+
+		if (force && visible) {
+			this.alwaysShow = true;
+		}
+
+		this.visible.set(visible, undefined);
+	}
+
 	outputHandle = handle++;
 	get model(): ICellOutput {
 		return this._outputRawData;
@@ -44,17 +64,16 @@ export class CellOutputViewModel extends Disposable implements ICellOutputViewMo
 
 	resolveMimeTypes(textModel: NotebookTextModel, kernelProvides: readonly string[] | undefined): [readonly IOrderedMimeType[], number] {
 		const mimeTypes = this._notebookService.getOutputMimeTypeInfo(textModel, kernelProvides, this.model);
-		let index = -1;
-		if (this._pickedMimeType) {
-			index = mimeTypes.findIndex(mimeType => mimeType.rendererId === this._pickedMimeType!.rendererId && mimeType.mimeType === this._pickedMimeType!.mimeType && mimeType.isTrusted);
-		}
-
-		// there is at least one mimetype which is safe and can be rendered by the core
-		if (index === -1) {
-			index = mimeTypes.findIndex(mimeType => mimeType.rendererId !== RENDERER_NOT_AVAILABLE && mimeType.isTrusted);
-		}
+		const index = mimeTypes.findIndex(mimeType => mimeType.rendererId !== RENDERER_NOT_AVAILABLE && mimeType.isTrusted);
 
 		return [mimeTypes, Math.max(index, 0)];
+	}
+
+	resetRenderer() {
+		// reset the output renderer
+		this._pickedMimeType = undefined;
+		this.model.bumpVersion();
+		this._onDidResetRendererEmitter.fire();
 	}
 
 	toRawJSON() {

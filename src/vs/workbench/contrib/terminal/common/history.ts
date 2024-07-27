@@ -10,12 +10,12 @@ import { IConfigurationService } from 'vs/platform/configuration/common/configur
 import { FileOperationError, FileOperationResult, IFileContent, IFileService } from 'vs/platform/files/common/files';
 import { IInstantiationService, ServicesAccessor } from 'vs/platform/instantiation/common/instantiation';
 import { IStorageService, StorageScope, StorageTarget } from 'vs/platform/storage/common/storage';
-import { PosixShellType, TerminalSettingId, TerminalShellType, WindowsShellType } from 'vs/platform/terminal/common/terminal';
+import { PosixShellType, TerminalSettingId, TerminalShellType } from 'vs/platform/terminal/common/terminal';
 import { URI } from 'vs/base/common/uri';
 import { IRemoteAgentService } from 'vs/workbench/services/remote/common/remoteAgentService';
 import { Schemas } from 'vs/base/common/network';
 import { isWindows, OperatingSystem } from 'vs/base/common/platform';
-import { posix, win32 } from 'vs/base/common/path';
+import { join } from 'vs/base/common/path';
 
 /**
  * Tracks a list of generic entries.
@@ -53,7 +53,7 @@ const enum StorageKeys {
 }
 
 let commandHistory: ITerminalPersistedHistory<{ shellType: TerminalShellType }> | undefined = undefined;
-export function getCommandHistory(accessor: ServicesAccessor): ITerminalPersistedHistory<{ shellType: TerminalShellType }> {
+export function getCommandHistory(accessor: ServicesAccessor): ITerminalPersistedHistory<{ shellType: TerminalShellType | undefined }> {
 	if (!commandHistory) {
 		commandHistory = accessor.get(IInstantiationService).createInstance(TerminalPersistedHistory, 'commands') as TerminalPersistedHistory<{ shellType: TerminalShellType }>;
 	}
@@ -69,8 +69,8 @@ export function getDirectoryHistory(accessor: ServicesAccessor): ITerminalPersis
 }
 
 // Shell file history loads once per shell per window
-const shellFileHistory: Map<TerminalShellType, string[] | null> = new Map();
-export async function getShellFileHistory(accessor: ServicesAccessor, shellType: TerminalShellType): Promise<string[]> {
+const shellFileHistory: Map<TerminalShellType | undefined, string[] | null> = new Map();
+export async function getShellFileHistory(accessor: ServicesAccessor, shellType: TerminalShellType | undefined): Promise<string[]> {
 	const cached = shellFileHistory.get(shellType);
 	if (cached === null) {
 		return [];
@@ -83,8 +83,7 @@ export async function getShellFileHistory(accessor: ServicesAccessor, shellType:
 		case PosixShellType.Bash:
 			result = await fetchBashHistory(accessor);
 			break;
-		case PosixShellType.PowerShell:
-		case WindowsShellType.PowerShell:
+		case PosixShellType.PowerShell: // WindowsShellType.PowerShell has the same value
 			result = await fetchPwshHistory(accessor);
 			break;
 		case PosixShellType.Zsh:
@@ -92,6 +91,9 @@ export async function getShellFileHistory(accessor: ServicesAccessor, shellType:
 			break;
 		case PosixShellType.Fish:
 			result = await fetchFishHistory(accessor);
+			break;
+		case PosixShellType.Python:
+			result = await fetchPythonHistory(accessor);
 			break;
 		default: return [];
 	}
@@ -129,18 +131,18 @@ export class TerminalPersistedHistory<T> extends Disposable implements ITerminal
 		this._entries = new LRUCache<string, T>(this._getHistoryLimit());
 
 		// Listen for config changes to set history limit
-		this._configurationService.onDidChangeConfiguration(e => {
+		this._register(this._configurationService.onDidChangeConfiguration(e => {
 			if (e.affectsConfiguration(TerminalSettingId.ShellIntegrationCommandHistory)) {
 				this._entries.limit = this._getHistoryLimit();
 			}
-		});
+		}));
 
 		// Listen to cache changes from other windows
-		this._storageService.onDidChangeValue(e => {
-			if (e.key === this._getTimestampStorageKey() && !this._isStale) {
+		this._register(this._storageService.onDidChangeValue(StorageScope.APPLICATION, this._getTimestampStorageKey(), this._store)(() => {
+			if (!this._isStale) {
 				this._isStale = this._storageService.getNumber(this._getTimestampStorageKey(), StorageScope.APPLICATION, 0) !== this._timestamp;
 			}
-		});
+		}));
 	}
 
 	add(key: string, value: T) {
@@ -296,6 +298,30 @@ export async function fetchZshHistory(accessor: ServicesAccessor) {
 	return result.values();
 }
 
+
+export async function fetchPythonHistory(accessor: ServicesAccessor): Promise<IterableIterator<string> | undefined> {
+	const fileService = accessor.get(IFileService);
+	const remoteAgentService = accessor.get(IRemoteAgentService);
+
+	const content = await fetchFileContents(env['HOME'], '.python_history', false, fileService, remoteAgentService);
+
+	if (content === undefined) {
+		return undefined;
+	}
+
+	// Python history file is a simple text file with one command per line
+	const fileLines = content.split('\n');
+	const result: Set<string> = new Set();
+
+	fileLines.forEach(line => {
+		if (line.trim().length > 0) {
+			result.add(line.trim());
+		}
+	});
+
+	return result.values();
+}
+
 export async function fetchPwshHistory(accessor: ServicesAccessor) {
 	const fileService: Pick<IFileService, 'readFile'> = accessor.get(IFileService);
 	const remoteAgentService: Pick<IRemoteAgentService, 'getConnection' | 'getEnvironment'> = accessor.get(IRemoteAgentService);
@@ -305,7 +331,7 @@ export async function fetchPwshHistory(accessor: ServicesAccessor) {
 	const isFileWindows = remoteEnvironment?.os === OperatingSystem.Windows || !remoteEnvironment && isWindows;
 	if (isFileWindows) {
 		folderPrefix = env['APPDATA'];
-		filePath = '\\Microsoft\\Windows\\PowerShell\\PSReadLine\\ConsoleHost_history.txt';
+		filePath = 'Microsoft\\Windows\\PowerShell\\PSReadLine\\ConsoleHost_history.txt';
 	} else {
 		folderPrefix = env['HOME'];
 		filePath = '.local/share/powershell/PSReadline/ConsoleHost_history.txt';
@@ -433,8 +459,7 @@ export function sanitizeFishHistoryCmd(cmd: string): string {
 	 * But since not all browsers support look aheads we opted to a simple
 	 * pattern and repeatedly calling replace method.
 	 */
-	return repeatedReplace(/(^|[^\\])((?:\\\\)*)(\\n)/g, cmd, '$1$2\n')
-		.replace(/\\/g, '\\');
+	return repeatedReplace(/(^|[^\\])((?:\\\\)*)(\\n)/g, cmd, '$1$2\n');
 }
 
 function repeatedReplace(pattern: RegExp, value: string, replaceValue: string): string {
@@ -459,10 +484,12 @@ async function fetchFileContents(
 	if (!folderPrefix) {
 		return undefined;
 	}
-	const isRemote = !!remoteAgentService.getConnection()?.remoteAuthority;
+	const connection = remoteAgentService.getConnection();
+	const isRemote = !!connection?.remoteAuthority;
 	const historyFileUri = URI.from({
 		scheme: isRemote ? Schemas.vscodeRemote : Schemas.file,
-		path: (isFileWindows ? win32.join : posix.join)(folderPrefix, filePath)
+		authority: isRemote ? connection.remoteAuthority : undefined,
+		path: URI.file(join(folderPrefix, filePath)).path
 	});
 	let content: IFileContent;
 	try {

@@ -10,16 +10,11 @@ export function deepClone<T>(obj: T): T {
 		return obj;
 	}
 	if (obj instanceof RegExp) {
-		// See https://github.com/microsoft/TypeScript/issues/10990
-		return obj as any;
+		return obj;
 	}
 	const result: any = Array.isArray(obj) ? [] : {};
-	Object.keys(<any>obj).forEach((key: string) => {
-		if ((<any>obj)[key] && typeof (<any>obj)[key] === 'object') {
-			result[key] = deepClone((<any>obj)[key]);
-		} else {
-			result[key] = (<any>obj)[key];
-		}
+	Object.entries(obj).forEach(([key, value]) => {
+		result[key] = value && typeof value === 'object' ? deepClone(value) : value;
 	});
 	return result;
 }
@@ -182,6 +177,9 @@ export function safeStringify(obj: any): string {
 				seen.add(value);
 			}
 		}
+		if (typeof value === 'bigint') {
+			return `[BigInt ${value.toString()}]`;
+		}
 		return value;
 	});
 }
@@ -235,10 +233,9 @@ export function filter(obj: obj, predicate: (key: string, value: any) => boolean
 
 export function getAllPropertyNames(obj: object): string[] {
 	let res: string[] = [];
-	let proto = Object.getPrototypeOf(obj);
-	while (Object.prototype !== proto) {
-		res = res.concat(Object.getOwnPropertyNames(proto));
-		proto = Object.getPrototypeOf(proto);
+	while (Object.prototype !== obj) {
+		res = res.concat(Object.getOwnPropertyNames(obj));
+		obj = Object.getPrototypeOf(obj);
 	}
 	return res;
 }
@@ -266,4 +263,12 @@ export function createProxyObject<T extends object>(methodNames: string[], invok
 		(<any>result)[methodName] = createProxyMethod(methodName);
 	}
 	return result;
+}
+
+export function mapValues<T extends {}, R>(obj: T, fn: (value: T[keyof T], key: string) => R): { [K in keyof T]: R } {
+	const result: { [key: string]: R } = {};
+	for (const [key, value] of Object.entries(obj)) {
+		result[key] = fn(<T[keyof T]>value, key);
+	}
+	return result as { [K in keyof T]: R };
 }

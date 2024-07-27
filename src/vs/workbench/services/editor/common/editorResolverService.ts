@@ -16,7 +16,7 @@ import { Extensions as ConfigurationExtensions, IConfigurationNode, IConfigurati
 import { IResourceEditorInput, ITextResourceEditorInput } from 'vs/platform/editor/common/editor';
 import { createDecorator } from 'vs/platform/instantiation/common/instantiation';
 import { Registry } from 'vs/platform/registry/common/platform';
-import { EditorInputWithOptions, EditorInputWithOptionsAndGroup, IResourceDiffEditorInput, IResourceMergeEditorInput, IUntitledTextResourceEditorInput, IUntypedEditorInput } from 'vs/workbench/common/editor';
+import { EditorInputWithOptions, EditorInputWithOptionsAndGroup, IResourceDiffEditorInput, IResourceMultiDiffEditorInput, IResourceMergeEditorInput, IUntitledTextResourceEditorInput, IUntypedEditorInput } from 'vs/workbench/common/editor';
 import { IEditorGroup } from 'vs/workbench/services/editor/common/editorGroupsService';
 import { PreferredGroup } from 'vs/workbench/services/editor/common/editorService';
 import { AtLeastOne } from 'vs/base/common/types';
@@ -43,7 +43,7 @@ const editorAssociationsConfigurationNode: IConfigurationNode = {
 	properties: {
 		'workbench.editorAssociations': {
 			type: 'object',
-			markdownDescription: localize('editor.editorAssociations', "Configure glob patterns to editors (e.g. `\"*.hex\": \"hexEditor.hexEdit\"`). These have precedence over the default behavior."),
+			markdownDescription: localize('editor.editorAssociations', "Configure [glob patterns](https://aka.ms/vscode-glob-patterns) to editors (for example `\"*.hex\": \"hexEditor.hexedit\"`). These have precedence over the default behavior."),
 			additionalProperties: {
 				type: 'string'
 			}
@@ -108,12 +108,15 @@ export type UntitledEditorInputFactoryFunction = (untitledEditorInput: IUntitled
 
 export type DiffEditorInputFactoryFunction = (diffEditorInput: IResourceDiffEditorInput, group: IEditorGroup) => EditorInputFactoryResult;
 
+export type MultiDiffEditorInputFactoryFunction = (multiDiffEditorInput: IResourceMultiDiffEditorInput, group: IEditorGroup) => EditorInputFactoryResult;
+
 export type MergeEditorInputFactoryFunction = (mergeEditorInput: IResourceMergeEditorInput, group: IEditorGroup) => EditorInputFactoryResult;
 
 type EditorInputFactories = {
 	createEditorInput?: EditorInputFactoryFunction;
 	createUntitledEditorInput?: UntitledEditorInputFactoryFunction;
 	createDiffEditorInput?: DiffEditorInputFactoryFunction;
+	createMultiDiffEditorInput?: MultiDiffEditorInputFactoryFunction;
 	createMergeEditorInput?: MergeEditorInputFactoryFunction;
 };
 
@@ -139,6 +142,11 @@ export interface IEditorResolverService {
 	 * Emitted when an editor is registered or unregistered.
 	 */
 	readonly onDidChangeEditorRegistrations: Event<void>;
+
+	/**
+	 * Given a callback, run the callback pausing the registration emitter
+	 */
+	bufferChangeEvents(callback: Function): void;
 
 	/**
 	 * Registers a specific editor. Editors with the same glob pattern and ID will be grouped together by the resolver.
@@ -174,6 +182,11 @@ export interface IEditorResolverService {
 	 * A set of all the editors that are registered to the editor resolver.
 	 */
 	getEditors(): RegisteredEditorInfo[];
+
+	/**
+	 * Get a complete list of editor associations.
+	 */
+	getAllUserAssociations(): EditorAssociations;
 }
 
 //#endregion
@@ -199,7 +212,6 @@ export function globMatchesResource(globPattern: string | glob.IRelativePattern,
 		Schemas.extension,
 		Schemas.webviewPanel,
 		Schemas.vscodeWorkspaceTrust,
-		Schemas.walkThrough,
 		Schemas.vscodeSettings
 	]);
 	// We want to say that the above schemes match no glob patterns

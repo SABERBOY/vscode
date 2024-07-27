@@ -3,7 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { findFirstInSorted } from 'vs/base/common/arrays';
+import { findFirstIdxMonotonousOrArrLen } from 'vs/base/common/arraysFind';
 import { RunOnceScheduler, TimeoutTimer } from 'vs/base/common/async';
 import { KeyCode, KeyMod } from 'vs/base/common/keyCodes';
 import { DisposableStore, dispose } from 'vs/base/common/lifecycle';
@@ -58,6 +58,7 @@ export const FIND_IDS = {
 	StartFindWithArgs: 'editor.actions.findWithArgs',
 	NextMatchFindAction: 'editor.action.nextMatchFindAction',
 	PreviousMatchFindAction: 'editor.action.previousMatchFindAction',
+	GoToMatchFindAction: 'editor.action.goToMatchFindAction',
 	NextSelectionMatchFindAction: 'editor.action.nextSelectionMatchFindAction',
 	PreviousSelectionMatchFindAction: 'editor.action.previousSelectionMatchFindAction',
 	StartFindReplaceAction: 'editor.action.startFindReplaceAction',
@@ -96,7 +97,12 @@ export class FindModelBoundToEditorModel {
 		this._decorations = new FindDecorations(editor);
 		this._toDispose.add(this._decorations);
 
-		this._updateDecorationsScheduler = new RunOnceScheduler(() => this.research(false), 100);
+		this._updateDecorationsScheduler = new RunOnceScheduler(() => {
+			if (!this._editor.hasModel()) {
+				return;
+			}
+			return this.research(false);
+		}, 100);
 		this._toDispose.add(this._updateDecorationsScheduler);
 
 		this._toDispose.add(this._editor.onDidChangeCursorPosition((e: ICursorPositionChangedEvent) => {
@@ -210,7 +216,7 @@ export class FindModelBoundToEditorModel {
 		if (currentMatchesPosition === 0 && findMatches.length > 0) {
 			// current selection is not on top of a match
 			// try to find its nearest result from the top of the document
-			const matchAfterSelection = findFirstInSorted(findMatches.map(match => match.range), range => Range.compareRangesUsingStarts(range, editorSelection) >= 0);
+			const matchAfterSelection = findFirstIdxMonotonousOrArrLen(findMatches.map(match => match.range), range => Range.compareRangesUsingStarts(range, editorSelection) >= 0);
 			currentMatchesPosition = matchAfterSelection > 0 ? matchAfterSelection - 1 + 1 /** match position is one based */ : currentMatchesPosition;
 		}
 
@@ -447,6 +453,17 @@ export class FindModelBoundToEditorModel {
 
 	public moveToNextMatch(): void {
 		this._moveToNextMatch(this._editor.getSelection().getEndPosition());
+	}
+
+	private _moveToMatch(index: number): void {
+		const decorationRange = this._decorations.getDecorationRangeAt(index);
+		if (decorationRange) {
+			this._setCurrentFindMatch(decorationRange);
+		}
+	}
+
+	public moveToMatch(index: number): void {
+		this._moveToMatch(index);
 	}
 
 	private _getReplacePattern(): ReplacePattern {

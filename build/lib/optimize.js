@@ -4,7 +4,10 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.minifyTask = exports.optimizeTask = exports.loaderConfig = void 0;
+exports.loaderConfig = loaderConfig;
+exports.optimizeLoaderTask = optimizeLoaderTask;
+exports.optimizeTask = optimizeTask;
+exports.minifyTask = minifyTask;
 const es = require("event-stream");
 const gulp = require("gulp");
 const concat = require("gulp-concat");
@@ -18,6 +21,7 @@ const bundle = require("./bundle");
 const i18n_1 = require("./i18n");
 const stats_1 = require("./stats");
 const util = require("./util");
+const postcss_1 = require("./postcss");
 const REPO_ROOT_PATH = path.join(__dirname, '../..');
 function log(prefix, message) {
     fancyLog(ansiColors.cyan('[' + prefix + ']'), message);
@@ -33,7 +37,6 @@ function loaderConfig() {
     result['vs/css'] = { inlineResources: true };
     return result;
 }
-exports.loaderConfig = loaderConfig;
 const IS_OUR_COPYRIGHT_REGEXP = /Copyright \(C\) Microsoft Corporation/i;
 function loaderPlugin(src, base, amdModuleId) {
     return (gulp
@@ -50,7 +53,7 @@ function loaderPlugin(src, base, amdModuleId) {
 function loader(src, bundledFileHeader, bundleLoader, externalLoaderInfo) {
     let loaderStream = gulp.src(`${src}/vs/loader.js`, { base: `${src}` });
     if (bundleLoader) {
-        loaderStream = es.merge(loaderStream, loaderPlugin(`${src}/vs/css.js`, `${src}`, 'vs/css'), loaderPlugin(`${src}/vs/nls.js`, `${src}`, 'vs/nls'));
+        loaderStream = es.merge(loaderStream, loaderPlugin(`${src}/vs/css.js`, `${src}`, 'vs/css'));
     }
     const files = [];
     const order = (f) => {
@@ -60,10 +63,7 @@ function loader(src, bundledFileHeader, bundleLoader, externalLoaderInfo) {
         if (f.path.endsWith('css.js')) {
             return 1;
         }
-        if (f.path.endsWith('nls.js')) {
-            return 2;
-        }
-        return 3;
+        return 2;
     };
     return (loaderStream
         .pipe(es.through(function (data) {
@@ -81,7 +81,7 @@ function loader(src, bundledFileHeader, bundleLoader, externalLoaderInfo) {
             files.push(new VinylFile({
                 path: 'fake2',
                 base: '.',
-                contents: Buffer.from(`require.config(${JSON.stringify(externalLoaderInfo, undefined, 2)});`)
+                contents: Buffer.from(emitExternalLoaderInfo(externalLoaderInfo))
             }));
         }
         for (const file of files) {
@@ -90,6 +90,17 @@ function loader(src, bundledFileHeader, bundleLoader, externalLoaderInfo) {
         this.emit('end');
     }))
         .pipe(concat('vs/loader.js')));
+}
+function emitExternalLoaderInfo(externalLoaderInfo) {
+    const externalBaseUrl = externalLoaderInfo.baseUrl;
+    externalLoaderInfo.baseUrl = '$BASE_URL';
+    // If defined, use the runtime configured baseUrl.
+    const code = `
+(function() {
+	const baseUrl = require.getConfig().baseUrl || ${JSON.stringify(externalBaseUrl)};
+	require.config(${JSON.stringify(externalLoaderInfo, undefined, 2)});
+})();`;
+    return code.replace('"$BASE_URL"', 'baseUrl');
 }
 function toConcatStream(src, bundledFileHeader, sources, dest, fileContentMapper) {
     const useSourcemaps = /\.js$/.test(dest) && !/\.nls\.js$/.test(dest);
@@ -135,65 +146,101 @@ const DEFAULT_FILE_HEADER = [
     ' * Copyright (C) Microsoft Corporation. All rights reserved.',
     ' *--------------------------------------------------------*/'
 ].join('\n');
-function optimizeTask(opts) {
+function optimizeAMDTask(opts) {
     const src = opts.src;
     const entryPoints = opts.entryPoints;
     const resources = opts.resources;
     const loaderConfig = opts.loaderConfig;
     const bundledFileHeader = opts.header || DEFAULT_FILE_HEADER;
-    const bundleLoader = (typeof opts.bundleLoader === 'undefined' ? true : opts.bundleLoader);
-    const out = opts.out;
     const fileContentMapper = opts.fileContentMapper || ((contents, _path) => contents);
-    return function () {
-        const sourcemaps = require('gulp-sourcemaps');
-        const bundlesStream = es.through(); // this stream will contain the bundled files
-        const resourcesStream = es.through(); // this stream will contain the resources
-        const bundleInfoStream = es.through(); // this stream will contain bundleInfo.json
-        bundle.bundle(entryPoints, loaderConfig, function (err, result) {
-            if (err || !result) {
-                return bundlesStream.emit('error', JSON.stringify(err));
+    const sourcemaps = require('gulp-sourcemaps');
+    const bundlesStream = es.through(); // this stream will contain the bundled files
+    const resourcesStream = es.through(); // this stream will contain the resources
+    const bundleInfoStream = es.through(); // this stream will contain bundleInfo.json
+    bundle.bundle(entryPoints, loaderConfig, function (err, result) {
+        if (err || !result) {
+            return bundlesStream.emit('error', JSON.stringify(err));
+        }
+        toBundleStream(src, bundledFileHeader, result.files, fileContentMapper).pipe(bundlesStream);
+        // Remove css inlined resources
+        const filteredResources = resources.slice();
+        result.cssInlinedResources.forEach(function (resource) {
+            if (process.env['VSCODE_BUILD_VERBOSE']) {
+                log('optimizer', 'excluding inlined: ' + resource);
             }
-            toBundleStream(src, bundledFileHeader, result.files, fileContentMapper).pipe(bundlesStream);
-            // Remove css inlined resources
-            const filteredResources = resources.slice();
-            result.cssInlinedResources.forEach(function (resource) {
-                if (process.env['VSCODE_BUILD_VERBOSE']) {
-                    log('optimizer', 'excluding inlined: ' + resource);
-                }
-                filteredResources.push('!' + resource);
-            });
-            gulp.src(filteredResources, { base: `${src}`, allowEmpty: true }).pipe(resourcesStream);
-            const bundleInfoArray = [];
-            if (opts.bundleInfo) {
-                bundleInfoArray.push(new VinylFile({
-                    path: 'bundleInfo.json',
-                    base: '.',
-                    contents: Buffer.from(JSON.stringify(result.bundleData, null, '\t'))
-                }));
-            }
-            es.readArray(bundleInfoArray).pipe(bundleInfoStream);
+            filteredResources.push('!' + resource);
         });
-        const result = es.merge(loader(src, bundledFileHeader, bundleLoader, opts.externalLoaderInfo), bundlesStream, resourcesStream, bundleInfoStream);
-        return result
-            .pipe(sourcemaps.write('./', {
-            sourceRoot: undefined,
-            addComment: true,
-            includeContent: true
-        }))
-            .pipe(opts.languages && opts.languages.length ? (0, i18n_1.processNlsFiles)({
-            fileHeader: bundledFileHeader,
-            languages: opts.languages
-        }) : es.through())
-            .pipe(gulp.dest(out));
+        gulp.src(filteredResources, { base: `${src}`, allowEmpty: true }).pipe(resourcesStream);
+        const bundleInfoArray = [];
+        if (opts.bundleInfo) {
+            bundleInfoArray.push(new VinylFile({
+                path: 'bundleInfo.json',
+                base: '.',
+                contents: Buffer.from(JSON.stringify(result.bundleData, null, '\t'))
+            }));
+        }
+        es.readArray(bundleInfoArray).pipe(bundleInfoStream);
+    });
+    const result = es.merge(loader(src, bundledFileHeader, false, opts.externalLoaderInfo), bundlesStream, resourcesStream, bundleInfoStream);
+    return result
+        .pipe(sourcemaps.write('./', {
+        sourceRoot: undefined,
+        addComment: true,
+        includeContent: true
+    }))
+        .pipe(opts.languages && opts.languages.length ? (0, i18n_1.processNlsFiles)({
+        out: opts.src,
+        fileHeader: bundledFileHeader,
+        languages: opts.languages
+    }) : es.through());
+}
+function optimizeCommonJSTask(opts) {
+    const esbuild = require('esbuild');
+    const src = opts.src;
+    const entryPoints = opts.entryPoints;
+    return gulp.src(entryPoints, { base: `${src}`, allowEmpty: true })
+        .pipe(es.map((f, cb) => {
+        esbuild.build({
+            entryPoints: [f.path],
+            bundle: true,
+            platform: opts.platform,
+            write: false,
+            external: opts.external
+        }).then(res => {
+            const jsFile = res.outputFiles[0];
+            f.contents = Buffer.from(jsFile.contents);
+            cb(undefined, f);
+        });
+    }));
+}
+function optimizeManualTask(options) {
+    const concatenations = options.map(opt => {
+        return gulp
+            .src(opt.src)
+            .pipe(concat(opt.out));
+    });
+    return es.merge(...concatenations);
+}
+function optimizeLoaderTask(src, out, bundleLoader, bundledFileHeader = '', externalLoaderInfo) {
+    return () => loader(src, bundledFileHeader, bundleLoader, externalLoaderInfo).pipe(gulp.dest(out));
+}
+function optimizeTask(opts) {
+    return function () {
+        const optimizers = [optimizeAMDTask(opts.amd)];
+        if (opts.commonJS) {
+            optimizers.push(optimizeCommonJSTask(opts.commonJS));
+        }
+        if (opts.manual) {
+            optimizers.push(optimizeManualTask(opts.manual));
+        }
+        return es.merge(...optimizers).pipe(gulp.dest(opts.out));
     };
 }
-exports.optimizeTask = optimizeTask;
 function minifyTask(src, sourceMapBaseUrl) {
     const esbuild = require('esbuild');
     const sourceMappingURL = sourceMapBaseUrl ? ((f) => `${sourceMapBaseUrl}/${f.relative}.map`) : undefined;
     return cb => {
         const cssnano = require('cssnano');
-        const postcss = require('gulp-postcss');
         const sourcemaps = require('gulp-sourcemaps');
         const svgmin = require('gulp-svgmin');
         const jsFilter = filter('**/*.js', { restore: true });
@@ -211,11 +258,18 @@ function minifyTask(src, sourceMapBaseUrl) {
             }).then(res => {
                 const jsFile = res.outputFiles.find(f => /\.js$/.test(f.path));
                 const sourceMapFile = res.outputFiles.find(f => /\.js\.map$/.test(f.path));
-                f.contents = Buffer.from(jsFile.contents);
-                f.sourceMap = JSON.parse(sourceMapFile.text);
-                cb(undefined, f);
+                const contents = Buffer.from(jsFile.contents);
+                const unicodeMatch = contents.toString().match(/[^\x00-\xFF]+/g);
+                if (unicodeMatch) {
+                    cb(new Error(`Found non-ascii character ${unicodeMatch[0]} in the minified output of ${f.path}. Non-ASCII characters in the output can cause performance problems when loading. Please review if you have introduced a regular expression that esbuild is not automatically converting and convert it to using unicode escape sequences.`));
+                }
+                else {
+                    f.contents = contents;
+                    f.sourceMap = JSON.parse(sourceMapFile.text);
+                    cb(undefined, f);
+                }
             }, cb);
-        }), jsFilter.restore, cssFilter, postcss([cssnano({ preset: 'default' })]), cssFilter.restore, svgFilter, svgmin(), svgFilter.restore, sourcemaps.mapSources((sourcePath) => {
+        }), jsFilter.restore, cssFilter, (0, postcss_1.gulpPostcss)([cssnano({ preset: 'default' })]), cssFilter.restore, svgFilter, svgmin(), svgFilter.restore, sourcemaps.mapSources((sourcePath) => {
             if (sourcePath === 'bootstrap-fork.js') {
                 return 'bootstrap-fork.orig.js';
             }
@@ -228,4 +282,4 @@ function minifyTask(src, sourceMapBaseUrl) {
         }), gulp.dest(src + '-min'), (err) => cb(err));
     };
 }
-exports.minifyTask = minifyTask;
+//# sourceMappingURL=optimize.js.map

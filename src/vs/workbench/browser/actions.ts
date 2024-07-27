@@ -4,7 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { IAction } from 'vs/base/common/actions';
-import { Disposable, DisposableStore, IDisposable, MutableDisposable } from 'vs/base/common/lifecycle';
+import { Disposable, DisposableStore, IDisposable } from 'vs/base/common/lifecycle';
 import { Emitter, Event } from 'vs/base/common/event';
 import { MenuId, IMenuService, IMenu, SubmenuItemAction, IMenuActionOptions } from 'vs/platform/actions/common/actions';
 import { IContextKeyService } from 'vs/platform/contextkey/common/contextkey';
@@ -23,7 +23,7 @@ class MenuActions extends Disposable {
 	private readonly _onDidChange = this._register(new Emitter<void>());
 	readonly onDidChange = this._onDidChange.event;
 
-	private disposables = this._register(new DisposableStore());
+	private readonly disposables = this._register(new DisposableStore());
 
 	constructor(
 		menuId: MenuId,
@@ -43,7 +43,7 @@ class MenuActions extends Disposable {
 		this.disposables.clear();
 		this._primaryActions = [];
 		this._secondaryActions = [];
-		this.disposables.add(createAndFillInActionBarActions(this.menu, this.options, { primary: this._primaryActions, secondary: this._secondaryActions }));
+		createAndFillInActionBarActions(this.menu, this.options, { primary: this._primaryActions, secondary: this._secondaryActions });
 		this.disposables.add(this.updateSubmenus([...this._primaryActions, ...this._secondaryActions], {}));
 		this._onDidChange.fire();
 	}
@@ -66,13 +66,12 @@ class MenuActions extends Disposable {
 export class CompositeMenuActions extends Disposable {
 
 	private readonly menuActions: MenuActions;
-	private readonly contextMenuActionsDisposable = this._register(new MutableDisposable());
 
 	private _onDidChange = this._register(new Emitter<void>());
 	readonly onDidChange: Event<void> = this._onDidChange.event;
 
 	constructor(
-		menuId: MenuId,
+		readonly menuId: MenuId,
 		private readonly contextMenuId: MenuId | undefined,
 		private readonly options: IMenuActionOptions | undefined,
 		@IContextKeyService private readonly contextKeyService: IContextKeyService,
@@ -97,9 +96,8 @@ export class CompositeMenuActions extends Disposable {
 		const actions: IAction[] = [];
 
 		if (this.contextMenuId) {
-			const menu = this.menuService.createMenu(this.contextMenuId, this.contextKeyService);
-			this.contextMenuActionsDisposable.value = createAndFillInActionBarActions(menu, this.options, { primary: [], secondary: actions });
-			menu.dispose();
+			const menu = this.menuService.getMenuActions(this.contextMenuId, this.contextKeyService, this.options);
+			createAndFillInActionBarActions(menu, { primary: [], secondary: actions });
 		}
 
 		return actions;

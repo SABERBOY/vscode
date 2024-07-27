@@ -7,12 +7,12 @@ import { RunOnceScheduler } from 'vs/base/common/async';
 import { CharCode } from 'vs/base/common/charCode';
 import { Codicon } from 'vs/base/common/codicons';
 import { MarkdownString } from 'vs/base/common/htmlContent';
-import { Disposable, IDisposable } from 'vs/base/common/lifecycle';
+import { Disposable } from 'vs/base/common/lifecycle';
 import * as platform from 'vs/base/common/platform';
-import { InvisibleCharacters } from 'vs/base/common/strings';
+import { InvisibleCharacters, isBasicASCII } from 'vs/base/common/strings';
 import 'vs/css!./unicodeHighlighter';
 import { IActiveCodeEditor, ICodeEditor } from 'vs/editor/browser/editorBrowser';
-import { EditorAction, registerEditorAction, registerEditorContribution, ServicesAccessor } from 'vs/editor/browser/editorExtensions';
+import { EditorAction, EditorContributionInstantiation, registerEditorAction, registerEditorContribution, ServicesAccessor } from 'vs/editor/browser/editorExtensions';
 import { InUntrustedWorkspace, inUntrustedWorkspace, EditorOption, InternalUnicodeHighlightOptions, unicodeHighlightConfigKeys } from 'vs/editor/common/config/editorOptions';
 import { Range } from 'vs/editor/common/core/range';
 import { IEditorContribution } from 'vs/editor/common/editorCommon';
@@ -22,7 +22,7 @@ import { UnicodeHighlighterOptions, UnicodeHighlighterReason, UnicodeHighlighter
 import { IEditorWorkerService, IUnicodeHighlightsResult } from 'vs/editor/common/services/editorWorker';
 import { ILanguageService } from 'vs/editor/common/languages/language';
 import { isModelDecorationInComment, isModelDecorationInString, isModelDecorationVisible } from 'vs/editor/common/viewModel/viewModelDecorations';
-import { HoverAnchor, HoverAnchorType, HoverParticipantRegistry, IEditorHoverParticipant, IEditorHoverRenderContext, IHoverPart } from 'vs/editor/contrib/hover/browser/hoverTypes';
+import { HoverAnchor, HoverAnchorType, HoverParticipantRegistry, IEditorHoverParticipant, IEditorHoverRenderContext, IHoverPart, IRenderedHoverParts } from 'vs/editor/contrib/hover/browser/hoverTypes';
 import { MarkdownHover, renderMarkdownHovers } from 'vs/editor/contrib/hover/browser/markdownHoverParticipant';
 import { BannerController } from 'vs/editor/contrib/unicodeHighlighter/browser/bannerController';
 import * as nls from 'vs/nls';
@@ -405,9 +405,11 @@ export class UnicodeHighlighterHover implements IHoverPart {
 	}
 }
 
+const configureUnicodeHighlightOptionsStr = nls.localize('unicodeHighlight.configureUnicodeHighlightOptions', 'Configure Unicode Highlight Options');
+
 export class UnicodeHighlighterHoverParticipant implements IEditorHoverParticipant<MarkdownHover> {
 
-	public readonly hoverOrdinal: number = 4;
+	public readonly hoverOrdinal: number = 5;
 
 	constructor(
 		private readonly _editor: ICodeEditor,
@@ -429,6 +431,7 @@ export class UnicodeHighlighterHoverParticipant implements IEditorHoverParticipa
 		}
 
 		const result: MarkdownHover[] = [];
+		const existedReason = new Set<string>();
 		let index = 300;
 		for (const d of lineDecorations) {
 
@@ -444,14 +447,24 @@ export class UnicodeHighlighterHoverParticipant implements IEditorHoverParticipa
 
 			let reason: string;
 			switch (highlightInfo.reason.kind) {
-				case UnicodeHighlighterReasonKind.Ambiguous:
-					reason = nls.localize(
-						'unicodeHighlight.characterIsAmbiguous',
-						'The character {0} could be confused with the character {1}, which is more common in source code.',
-						codePointStr,
-						formatCodePointMarkdown(highlightInfo.reason.confusableWith.codePointAt(0)!)
-					);
+				case UnicodeHighlighterReasonKind.Ambiguous: {
+					if (isBasicASCII(highlightInfo.reason.confusableWith)) {
+						reason = nls.localize(
+							'unicodeHighlight.characterIsAmbiguousASCII',
+							'The character {0} could be confused with the ASCII character {1}, which is more common in source code.',
+							codePointStr,
+							formatCodePointMarkdown(highlightInfo.reason.confusableWith.codePointAt(0)!)
+						);
+					} else {
+						reason = nls.localize(
+							'unicodeHighlight.characterIsAmbiguous',
+							'The character {0} could be confused with the character {1}, which is more common in source code.',
+							codePointStr,
+							formatCodePointMarkdown(highlightInfo.reason.confusableWith.codePointAt(0)!)
+						);
+					}
 					break;
+				}
 
 				case UnicodeHighlighterReasonKind.Invisible:
 					reason = nls.localize(
@@ -470,6 +483,11 @@ export class UnicodeHighlighterHoverParticipant implements IEditorHoverParticipa
 					break;
 			}
 
+			if (existedReason.has(reason)) {
+				continue;
+			}
+			existedReason.add(reason);
+
 			const adjustSettingsArgs: ShowExcludeOptionsArgs = {
 				codePoint: codePoint,
 				reason: highlightInfo.reason,
@@ -482,14 +500,18 @@ export class UnicodeHighlighterHoverParticipant implements IEditorHoverParticipa
 			const markdown = new MarkdownString('', true)
 				.appendMarkdown(reason)
 				.appendText(' ')
-				.appendLink(uri, adjustSettings);
-			result.push(new MarkdownHover(this, d.range, [markdown], index++));
+				.appendLink(uri, adjustSettings, configureUnicodeHighlightOptionsStr);
+			result.push(new MarkdownHover(this, d.range, [markdown], false, index++));
 		}
 		return result;
 	}
 
-	public renderHoverParts(context: IEditorHoverRenderContext, hoverParts: MarkdownHover[]): IDisposable {
+	public renderHoverParts(context: IEditorHoverRenderContext, hoverParts: MarkdownHover[]): IRenderedHoverParts<MarkdownHover> {
 		return renderMarkdownHovers(context, hoverParts, this._editor, this._languageService, this._openerService);
+	}
+
+	public getAccessibleContent(hoverPart: MarkdownHover): string {
+		return hoverPart.contents.map(c => c.value).join('\n');
 	}
 }
 
@@ -751,7 +773,7 @@ export class ShowExcludeOptions extends EditorAction {
 
 		const result = await quickPickService.pick(
 			options,
-			{ title: nls.localize('unicodeHighlight.configureUnicodeHighlightOptions', 'Configure Unicode Highlight Options') }
+			{ title: configureUnicodeHighlightOptionsStr }
 		);
 
 		if (result) {
@@ -803,5 +825,5 @@ registerEditorAction(DisableHighlightingOfAmbiguousCharactersAction);
 registerEditorAction(DisableHighlightingOfInvisibleCharactersAction);
 registerEditorAction(DisableHighlightingOfNonBasicAsciiCharactersAction);
 registerEditorAction(ShowExcludeOptions);
-registerEditorContribution(UnicodeHighlighter.ID, UnicodeHighlighter);
+registerEditorContribution(UnicodeHighlighter.ID, UnicodeHighlighter, EditorContributionInstantiation.AfterFirstRender);
 HoverParticipantRegistry.register(UnicodeHighlighterHoverParticipant);

@@ -30,13 +30,15 @@ function sleep(ms: number): Promise<void> {
 	});
 }
 
+const notebookType = 'notebookCoreTest';
+
 export class Kernel {
 
 	readonly controller: vscode.NotebookController;
 
 	readonly associatedNotebooks = new Set<string>();
 
-	constructor(id: string, label: string, viewType: string = 'notebookCoreTest') {
+	constructor(id: string, label: string, viewType: string = notebookType) {
 		this.controller = vscode.notebooks.createNotebookController(id, viewType, label);
 		this.controller.executeHandler = this._execute.bind(this);
 		this.controller.supportsExecutionOrder = true;
@@ -75,24 +77,20 @@ function getFocusedCell(editor?: vscode.NotebookEditor) {
 	return editor ? editor.notebook.cellAt(editor.selections[0].start) : undefined;
 }
 
-const apiTestContentProvider: vscode.NotebookContentProvider = {
-	openNotebook: async (resource: vscode.Uri): Promise<vscode.NotebookData> => {
-		if (/.*empty\-.*\.vsctestnb$/.test(resource.path)) {
-			return {
-				metadata: {},
-				cells: []
-			};
-		}
-
+const apiTestSerializer: vscode.NotebookSerializer = {
+	serializeNotebook(_data, _token) {
+		return new Uint8Array();
+	},
+	deserializeNotebook(_content, _token) {
 		const dto: vscode.NotebookData = {
-			metadata: { custom: { testMetadata: false } },
+			metadata: { testMetadata: false },
 			cells: [
 				{
 					value: 'test',
 					languageId: 'typescript',
 					kind: vscode.NotebookCellKind.Code,
 					outputs: [],
-					metadata: { custom: { testCellMetadata: 123 } },
+					metadata: { testCellMetadata: 123 },
 					executionSummary: { timing: { startTime: 10, endTime: 20 } }
 				},
 				{
@@ -109,24 +107,12 @@ const apiTestContentProvider: vscode.NotebookContentProvider = {
 							})
 					],
 					executionSummary: { executionOrder: 5, success: true },
-					metadata: { custom: { testCellMetadata: 456 } }
+					metadata: { testCellMetadata: 456 }
 				}
 			]
 		};
 		return dto;
 	},
-	saveNotebook: async (_document: vscode.NotebookDocument, _cancellation: vscode.CancellationToken) => {
-		return;
-	},
-	saveNotebookAs: async (_targetResource: vscode.Uri, _document: vscode.NotebookDocument, _cancellation: vscode.CancellationToken) => {
-		return;
-	},
-	backupNotebook: async (_document: vscode.NotebookDocument, _context: vscode.NotebookDocumentBackupContext, _cancellation: vscode.CancellationToken) => {
-		return {
-			id: '1',
-			delete: () => { }
-		};
-	}
 };
 
 (vscode.env.uiKind === vscode.UIKind.Web ? suite.skip : suite)('Notebook API tests', function () {
@@ -146,7 +132,7 @@ const apiTestContentProvider: vscode.NotebookContentProvider = {
 	});
 
 	suiteSetup(function () {
-		suiteDisposables.push(vscode.workspace.registerNotebookContentProvider('notebookCoreTest', apiTestContentProvider));
+		suiteDisposables.push(vscode.workspace.registerNotebookSerializer(notebookType, apiTestSerializer));
 	});
 
 	let defaultKernel: Kernel;
@@ -188,7 +174,7 @@ const apiTestContentProvider: vscode.NotebookContentProvider = {
 		assert.strictEqual(firstNotebookEditor?.notebook, secondNotebookEditor?.notebook, 'split notebook editors share the same document');
 	});
 
-	test.skip('#106657. Opening a notebook from markers view is broken ', async function () {
+	test('#106657. Opening a notebook from markers view is broken ', async function () {
 
 		const document = await openRandomNotebookDocument();
 		const [cell] = document.getCells();
@@ -197,7 +183,6 @@ const apiTestContentProvider: vscode.NotebookContentProvider = {
 
 		// opening a cell-uri opens a notebook editor
 		await vscode.window.showTextDocument(cell.document, { viewColumn: vscode.ViewColumn.Active });
-		// await vscode.commands.executeCommand('vscode.open', cell.document.uri, vscode.ViewColumn.Active);
 
 		assert.strictEqual(!!vscode.window.activeNotebookEditor, true);
 		assert.strictEqual(vscode.window.activeNotebookEditor!.notebook.uri.toString(), document.uri.toString());
@@ -238,13 +223,39 @@ const apiTestContentProvider: vscode.NotebookContentProvider = {
 	});
 
 	test('#102411 - untitled notebook creation failed', async function () {
-		await vscode.commands.executeCommand('workbench.action.files.newUntitledFile', { viewType: 'notebookCoreTest' });
+		const document = await vscode.workspace.openNotebookDocument(notebookType, undefined);
+		await vscode.window.showNotebookDocument(document);
 		assert.notStrictEqual(vscode.window.activeNotebookEditor, undefined, 'untitled notebook editor is not undefined');
 
 		await closeAllEditors();
 	});
 
-	test('#115855 onDidSaveNotebookDocument', async function () {
+	test('#207742 - New Untitled notebook failed if previous untilted notebook is modified', async function () {
+		await vscode.commands.executeCommand('ipynb.newUntitledIpynb');
+		assert.notStrictEqual(vscode.window.activeNotebookEditor, undefined, 'untitled notebook editor is not undefined');
+		const document = vscode.window.activeNotebookEditor!.notebook;
+
+		// open another text editor
+		const textDocument = await vscode.workspace.openTextDocument({ language: 'javascript', content: 'let abc = 0;' });
+		await vscode.window.showTextDocument(textDocument);
+
+		// insert a new cell to notebook document
+		const edit = new vscode.WorkspaceEdit();
+		const notebookEdit = new vscode.NotebookEdit(new vscode.NotebookRange(1, 1), [new vscode.NotebookCellData(vscode.NotebookCellKind.Code, 'print(1)', 'python')]);
+		edit.set(document.uri, [notebookEdit]);
+		await vscode.workspace.applyEdit(edit);
+
+		// switch to the notebook editor
+		await vscode.window.showNotebookDocument(document);
+		await closeAllEditors();
+		await vscode.commands.executeCommand('ipynb.newUntitledIpynb');
+		assert.notStrictEqual(vscode.window.activeNotebookEditor, undefined, 'untitled notebook editor is not undefined');
+
+		await closeAllEditors();
+	});
+
+	// TODO: Skipped due to notebook content provider removal
+	test.skip('#115855 onDidSaveNotebookDocument', async function () {
 		const resource = await createRandomNotebookFile();
 		const notebook = await vscode.workspace.openNotebookDocument(resource);
 
@@ -259,44 +270,6 @@ const apiTestContentProvider: vscode.NotebookContentProvider = {
 		await saveEvent;
 
 		assert.strictEqual(notebook.isDirty, false);
-	});
-});
-
-(vscode.env.uiKind === vscode.UIKind.Web ? suite.skip : suite)('statusbar', () => {
-	const emitter = new vscode.EventEmitter<vscode.NotebookCell>();
-	const onDidCallProvide = emitter.event;
-	const suiteDisposables: vscode.Disposable[] = [];
-	suiteTeardown(async function () {
-		assertNoRpc();
-
-		await revertAllDirty();
-		await closeAllEditors();
-
-		disposeAll(suiteDisposables);
-		suiteDisposables.length = 0;
-	});
-
-	suiteSetup(() => {
-		suiteDisposables.push(vscode.notebooks.registerNotebookCellStatusBarItemProvider('notebookCoreTest', {
-			async provideCellStatusBarItems(cell: vscode.NotebookCell, _token: vscode.CancellationToken): Promise<vscode.NotebookCellStatusBarItem[]> {
-				emitter.fire(cell);
-				return [];
-			}
-		}));
-
-		suiteDisposables.push(vscode.workspace.registerNotebookContentProvider('notebookCoreTest', apiTestContentProvider));
-	});
-
-	test('provideCellStatusBarItems called on metadata change', async function () {
-		const provideCalled = asPromise(onDidCallProvide);
-		const notebook = await openRandomNotebookDocument();
-		await vscode.window.showNotebookDocument(notebook);
-		await provideCalled;
-
-		const edit = new vscode.WorkspaceEdit();
-		edit.replaceNotebookCellMetadata(notebook.uri, 0, { inputCollapsed: true });
-		await vscode.workspace.applyEdit(edit);
-		await provideCalled;
 	});
 });
 

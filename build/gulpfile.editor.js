@@ -6,8 +6,9 @@
 const gulp = require('gulp');
 const path = require('path');
 const util = require('./lib/util');
+const { getVersion } = require('./lib/getVersion');
 const task = require('./lib/task');
-const common = require('./lib/optimize');
+const optimize = require('./lib/optimize');
 const es = require('event-stream');
 const File = require('vinyl');
 const i18n = require('./lib/i18n');
@@ -18,7 +19,7 @@ const monacoapi = require('./lib/monaco-api');
 const fs = require('fs');
 
 const root = path.dirname(__dirname);
-const sha1 = util.getVersion(root);
+const sha1 = getVersion(root);
 const semver = require('./monaco/package.json').version;
 const headerVersion = semver + '(' + sha1 + ')';
 
@@ -28,19 +29,17 @@ const editorEntryPoints = [
 	{
 		name: 'vs/editor/editor.main',
 		include: [],
-		exclude: ['vs/css', 'vs/nls'],
+		exclude: ['vs/css'],
 		prepend: [
-			{ path: 'out-editor-build/vs/css.js', amdModuleId: 'vs/css' },
-			{ path: 'out-editor-build/vs/nls.js', amdModuleId: 'vs/nls' }
+			{ path: 'out-editor-build/vs/css.js', amdModuleId: 'vs/css' }
 		],
 	},
 	{
 		name: 'vs/base/common/worker/simpleWorker',
 		include: ['vs/editor/common/services/editorSimpleWorker'],
-		exclude: ['vs/nls'],
+		exclude: [],
 		prepend: [
 			{ path: 'vs/loader.js' },
-			{ path: 'vs/nls.js', amdModuleId: 'vs/nls' },
 			{ path: 'vs/base/worker/workerMain.js' }
 		],
 		dest: 'vs/base/worker/workerMain.js'
@@ -84,28 +83,32 @@ const extractEditorSrcTask = task.define('extract-editor-src', () => {
 	});
 });
 
-const compileEditorAMDTask = task.define('compile-editor-amd', compilation.compileTask('out-editor-src', 'out-editor-build', true));
+// Disable mangling for the editor, as it complicates debugging & quite a few users rely on private/protected fields.
+// Disable NLS task to remove english strings to preserve backwards compatibility when we removed the `vs/nls!` AMD plugin.
+const compileEditorAMDTask = task.define('compile-editor-amd', compilation.compileTask('out-editor-src', 'out-editor-build', true, { disableMangle: true, preserveEnglish: true }));
 
-const optimizeEditorAMDTask = task.define('optimize-editor-amd', common.optimizeTask({
-	src: 'out-editor-build',
-	entryPoints: editorEntryPoints,
-	resources: editorResources,
-	loaderConfig: {
-		paths: {
-			'vs': 'out-editor-build/vs',
-			'vs/css': 'out-editor-build/vs/css.build',
-			'vs/nls': 'out-editor-build/vs/nls.build',
-			'vscode': 'empty:'
+const optimizeEditorAMDTask = task.define('optimize-editor-amd', optimize.optimizeTask(
+	{
+		out: 'out-editor',
+		amd: {
+			src: 'out-editor-build',
+			entryPoints: editorEntryPoints,
+			resources: editorResources,
+			loaderConfig: {
+				paths: {
+					'vs': 'out-editor-build/vs',
+					'vs/css': 'out-editor-build/vs/css.build',
+					'vscode': 'empty:'
+				}
+			},
+			header: BUNDLED_FILE_HEADER,
+			bundleInfo: true,
+			languages
 		}
-	},
-	bundleLoader: false,
-	header: BUNDLED_FILE_HEADER,
-	bundleInfo: true,
-	out: 'out-editor',
-	languages: languages
-}));
+	}
+));
 
-const minifyEditorAMDTask = task.define('minify-editor-amd', common.minifyTask('out-editor'));
+const minifyEditorAMDTask = task.define('minify-editor-amd', optimize.minifyTask('out-editor'));
 
 const createESMSourcesAndResourcesTask = task.define('extract-editor-esm', () => {
 	standalone.createESMSourcesAndResources2({
@@ -119,7 +122,6 @@ const createESMSourcesAndResourcesTask = task.define('extract-editor-esm', () =>
 			'vs/base/worker/workerMain.ts',
 		],
 		renames: {
-			'vs/nls.mock.ts': 'vs/nls.ts'
 		}
 	});
 });
@@ -415,50 +417,17 @@ gulp.task('editor-distro',
 	)
 );
 
-const bundleEditorESMTask = task.define('editor-esm-bundle-webpack', () => {
-	const webpack = require('webpack');
-	const webpackGulp = require('webpack-stream');
-
-	const result = es.through();
-
-	const webpackConfigPath = path.join(root, 'build/monaco/monaco.webpack.config.js');
-
-	const webpackConfig = {
-		...require(webpackConfigPath),
-		...{ mode: 'production' }
-	};
-
-	const webpackDone = (err, stats) => {
-		if (err) {
-			result.emit('error', err);
-			return;
-		}
-		const { compilation } = stats;
-		if (compilation.errors.length > 0) {
-			result.emit('error', compilation.errors.join('\n'));
-		}
-		if (compilation.warnings.length > 0) {
-			result.emit('data', compilation.warnings.join('\n'));
-		}
-	};
-
-	return webpackGulp(webpackConfig, webpack, webpackDone)
-		.pipe(gulp.dest('out-editor-esm-bundle'));
-});
-
-gulp.task('editor-esm-bundle',
+gulp.task('editor-esm',
 	task.series(
 		task.parallel(
 			util.rimraf('out-editor-src'),
 			util.rimraf('out-editor-esm'),
 			util.rimraf('out-monaco-editor-core'),
-			util.rimraf('out-editor-esm-bundle'),
 		),
 		extractEditorSrcTask,
 		createESMSourcesAndResourcesTask,
 		compileEditorESMTask,
 		appendJSToESMImportsTask,
-		bundleEditorESMTask,
 	)
 );
 
